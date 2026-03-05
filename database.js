@@ -117,6 +117,15 @@ function removeHabit(habitId, userId) {
   db.prepare('UPDATE habits SET active = 0 WHERE id = ? AND user_id = ?').run(habitId, userId);
 }
 
+function updateHabit(habitId, userId, fields) {
+  const allowed = ['habit_name', 'target_value', 'notify_morning', 'notify_night'];
+  const updates = Object.entries(fields).filter(([k]) => allowed.includes(k));
+  if (!updates.length) return;
+  const set  = updates.map(([k]) => `${k} = ?`).join(', ');
+  const vals = updates.map(([, v]) => v);
+  db.prepare(`UPDATE habits SET ${set} WHERE id = ? AND user_id = ?`).run(...vals, habitId, userId);
+}
+
 function seedDefaultHabits(userId) {
   const defaults = [
     // Morning
@@ -199,7 +208,7 @@ function getRangeLogs(userId, startDate, endDate) {
 module.exports = {
   getDb,
   getOrCreateUser, getUser, updateUserTimezone, getAllUsers, getActiveUsers,
-  getHabits, addHabit, removeHabit, seedDefaultHabits,
+  getHabits, addHabit, removeHabit, updateHabit, seedDefaultHabits,
   getNotifications, setDefaultNotifications, updateNotification, markNotificationSent,
   logHabit, getLog, getTodayLogs, getRangeLogs,
 };

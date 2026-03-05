@@ -46,7 +46,7 @@ bot.onText(/\/start/, async (msg) => {
 // ── /help ──────────────────────────────────────────────────────────────────
 bot.onText(/\/help/, async (msg) => {
   await bot.sendMessage(msg.chat.id,
-    `/log — check in now\n/status — today's progress\n/dashboard — weekly & monthly metrics\n/addhabit — add a habit\n/removehabit — remove a habit\n/config — notification times & timezone\n/start — register / reset`
+    `/log — check in now\n/status — today's progress\n/dashboard — weekly & monthly metrics\n/addhabit — add a habit\n/edithabit — edit name, target, or check-in slot\n/removehabit — remove a habit\n/config — notification times & timezone\n/start — register / reset`
   );
 });
 
@@ -114,7 +114,26 @@ bot.onText(/\/addhabit/, async (msg) => {
   await bot.sendMessage(chatId, 'Habit name?', { reply_markup: { force_reply: true } });
 });
 
-// ── /removehabit ───────────────────────────────────────────────────────────
+// ── /edithabit ─────────────────────────────────────────────────────────────
+bot.onText(/\/edithabit/, async (msg) => {
+  const chatId = msg.chat.id;
+  const user   = requireUser(chatId, msg.from.id);
+  if (!user) return;
+
+  const habits = db.getHabits(user.id);
+  if (!habits.length) return bot.sendMessage(chatId, 'No habits. Use /addhabit.');
+
+  await bot.sendMessage(chatId, 'Which habit to edit?', {
+    reply_markup: {
+      inline_keyboard: habits.map(h => [{
+        text: `${categoryEmoji(h.category)} ${h.habit_name}${h.target_value ? ` (${h.target_value})` : ''}`,
+        callback_data: `ep:${h.id}`,
+      }]),
+    },
+  });
+});
+
+
 bot.onText(/\/removehabit/, async (msg) => {
   const chatId = msg.chat.id;
   const user   = requireUser(chatId, msg.from.id);
@@ -258,7 +277,56 @@ bot.on('callback_query', async (q) => {
     return;
   }
 
-  // Admin actions
+  // ep:{habitId} — edit: pick field
+  if (data.startsWith('ep:')) {
+    const habitId = data.split(':')[1];
+    await bot.editMessageText('Edit which field?', {
+      chat_id: chatId, message_id: msgId,
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '✏️ Name',       callback_data: `ef:${habitId}:name`   }],
+          [{ text: '🎯 Target',     callback_data: `ef:${habitId}:target` }],
+          [{ text: '🔔 Check-in',   callback_data: `ef:${habitId}:slot`   }],
+        ],
+      },
+    });
+    return;
+  }
+
+  // ef:{habitId}:{field} — edit: choose field
+  if (data.startsWith('ef:')) {
+    const [, habitId, field] = data.split(':');
+    if (field === 'slot') {
+      await bot.editMessageText('Remind in?', {
+        chat_id: chatId, message_id: msgId,
+        reply_markup: {
+          inline_keyboard: [[
+            { text: '🌅 Morning', callback_data: `es:${habitId}:morning` },
+            { text: '🌙 Night',   callback_data: `es:${habitId}:night`   },
+            { text: 'Both',       callback_data: `es:${habitId}:both`    },
+          ]],
+        },
+      });
+    } else {
+      const prompt = field === 'name' ? 'New name?' : 'New target? (e.g. 3L, 150 reps, or type skip)';
+      state.set(String(telegramId), { step: `edit_${field}`, data: { habitId: parseInt(habitId) } });
+      await bot.sendMessage(chatId, prompt, { reply_markup: { force_reply: true } });
+    }
+    return;
+  }
+
+  // es:{habitId}:{slot} — edit: update check-in slot
+  if (data.startsWith('es:')) {
+    const [, habitId, slot] = data.split(':');
+    db.updateHabit(parseInt(habitId), user.id, {
+      notify_morning: (slot === 'morning' || slot === 'both') ? 1 : 0,
+      notify_night:   (slot === 'night'   || slot === 'both') ? 1 : 0,
+    });
+    await bot.editMessageText(`✅ Check-in updated to: ${slot}`, { chat_id: chatId, message_id: msgId });
+    return;
+  }
+
+
   if (data.startsWith('adm:') && String(telegramId) === String(config.ADMIN_ID)) {
     if (data === 'adm:broadcast') {
       state.set(String(telegramId), { step: 'adm_broadcast', data: {} });
@@ -321,7 +389,23 @@ bot.on('message', async (msg) => {
       });
       break;
 
-    case 'cfg_morning':
+    case 'edit_name': {
+      const name = text.slice(0, 80);
+      db.updateHabit(s.data.habitId, user.id, { habit_name: name });
+      state.delete(String(telegramId));
+      await bot.sendMessage(chatId, `✅ Renamed to: *${name}*`, { parse_mode: 'Markdown' });
+      break;
+    }
+
+    case 'edit_target': {
+      const target = text.toLowerCase() === 'skip' ? null : text;
+      db.updateHabit(s.data.habitId, user.id, { target_value: target });
+      state.delete(String(telegramId));
+      await bot.sendMessage(chatId, target ? `✅ Target set to: *${target}*` : '✅ Target cleared.', { parse_mode: 'Markdown' });
+      break;
+    }
+
+
     case 'cfg_night': {
       const type = s.step === 'cfg_morning' ? 'morning' : 'night';
       if (/^\d{1,2}:\d{2}$/.test(text)) {
