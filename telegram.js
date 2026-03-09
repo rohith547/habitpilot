@@ -406,6 +406,7 @@ bot.on('message', async (msg) => {
     }
 
 
+    case 'cfg_morning':
     case 'cfg_night': {
       const type = s.step === 'cfg_morning' ? 'morning' : 'night';
       if (/^\d{1,2}:\d{2}$/.test(text)) {
