@@ -2,6 +2,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const config    = require('./config');
 const db        = require('./database');
 const dashboard = require('./dashboard');
+const errors    = require('./errors');
 const {
   getToday, completionLabel, categoryEmoji, buildLogKeyboard,
   buildAllDoneKeyboard, buildHeatmap,
@@ -23,12 +24,39 @@ bot.setMyCommands([
   { command: 'edithabit',   description: '✏️ Edit name, target, reminder, or order' },
   { command: 'removehabit', description: '🗑 Remove a habit' },
   { command: 'config',      description: '⚙️ Reminder times & timezone' },
+  { command: 'pause',       description: '⏸ Pause reminders for 1–14 days' },
+  { command: 'resume',      description: '▶️ Resume reminders' },
   { command: 'help',        description: '❓ Show all commands' },
   { command: 'start',       description: '🚀 Register / reset' },
 ]).catch(err => console.error('[Bot] setMyCommands failed:', err.message));
 
-// In-memory conversation state: telegramId → { step, data }
+// In-memory conversation state: telegramId → { step, data, _ts }
 const state = new Map();
+
+// Rate limiter for callback queries
+const lastCallback = new Map(); // telegramId → timestamp
+
+// State helpers with 10-min TTL
+function setState(key, value) {
+  state.set(key, { ...value, _ts: Date.now() });
+}
+function getState(key) {
+  const s = state.get(key);
+  if (!s) return null;
+  if (Date.now() - s._ts > 10 * 60 * 1000) {
+    state.delete(key);
+    return null;
+  }
+  return s;
+}
+
+// Cleanup stale state entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, val] of state.entries()) {
+    if (now - (val._ts || 0) > 10 * 60 * 1000) state.delete(key);
+  }
+}, 5 * 60 * 1000);
 
 // ── Date range helper ──────────────────────────────────────────────────────
 function getRangeDates(days, timezone) {
@@ -73,8 +101,11 @@ async function sendConfigMenu(chatId, userId) {
   }]);
   rows.push([{ text: '➕ Add reminder', callback_data: 'nadd' }]);
   rows.push([{ text: '🌍 Timezone',     callback_data: 'cfg:tz' }]);
+  const pauseStatus = user?.paused_until
+    ? `⏸ Paused until: ${user.paused_until}`
+    : `▶️ Active`;
   await bot.sendMessage(chatId,
-    `*Config*\n\nTimezone: ${user?.timezone || 'America/Chicago'}\n\n*Reminders (tap to edit time):*`,
+    `*Config*\n\nTimezone: ${user?.timezone || 'America/Chicago'}\n${pauseStatus}\n\n*Reminders (tap to edit time):*`,
     { parse_mode: 'Markdown', reply_markup: { inline_keyboard: rows } }
   );
 }
@@ -84,17 +115,42 @@ bot.onText(/\/start/, async (msg) => {
   const { id: telegramId, username, first_name } = msg.from;
   const chatId = msg.chat.id;
 
-  db.getDb();
-  const { user, isNew } = db.getOrCreateUser(telegramId, username, first_name);
+  try {
+    db.getDb();
+    const { user, isNew } = db.getOrCreateUser(telegramId, username, first_name);
 
-  if (isNew) {
-    db.seedDefaultHabits(user.id);
-    db.setDefaultNotifications(user.id);
-    await bot.sendMessage(chatId,
-      `Hi ${first_name || 'there'}.\n\nDefault habits configured.\nMorning check-in: 7:30 AM\nNight review: 9:30 PM\n\n/log to check in now. /config to customize.`
-    );
-  } else {
-    await bot.sendMessage(chatId, `Welcome back.\n\n/log to check in. /status for today.`);
+    if (isNew) {
+      setState(String(telegramId), { step: 'onb_tz', data: {} });
+      await bot.sendMessage(chatId,
+        `👋 Welcome to HabitPilot! Let's set up in 3 quick steps.\n\nStep 1/3 — 🌍 Where are you?`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '🇺🇸 New York',    callback_data: 'onb_tz:America/New_York'    },
+                { text: '🇺🇸 Chicago',     callback_data: 'onb_tz:America/Chicago'     },
+              ],
+              [
+                { text: '🇺🇸 Los Angeles', callback_data: 'onb_tz:America/Los_Angeles' },
+                { text: '🇬🇧 London',      callback_data: 'onb_tz:Europe/London'       },
+              ],
+              [
+                { text: '🇮🇳 India',       callback_data: 'onb_tz:Asia/Kolkata'        },
+                { text: '🇸🇬 Singapore',   callback_data: 'onb_tz:Asia/Singapore'      },
+              ],
+              [
+                { text: '🇦🇺 Sydney',      callback_data: 'onb_tz:Australia/Sydney'    },
+                { text: '✏️ Type mine',    callback_data: 'onb_tz:custom'              },
+              ],
+            ],
+          },
+        }
+      );
+    } else {
+      await bot.sendMessage(chatId, `Welcome back.\n\n/log to check in. /status for today.`);
+    }
+  } catch (err) {
+    errors.logError('/start', err, telegramId);
   }
 });
 
@@ -286,7 +342,7 @@ bot.onText(/\/addhabit/, async (msg) => {
   const user   = requireUser(chatId, msg.from.id);
   if (!user) return;
 
-  state.set(String(msg.from.id), { step: 'add_name', data: {} });
+  setState(String(msg.from.id), { step: 'add_name', data: {} });
   await bot.sendMessage(chatId, 'Habit name?', { reply_markup: { force_reply: true } });
 });
 
@@ -328,6 +384,40 @@ bot.onText(/\/removehabit/, async (msg) => {
   });
 });
 
+// ── /pause ─────────────────────────────────────────────────────────────────
+bot.onText(/\/pause/, async (msg) => {
+  const chatId = msg.chat.id;
+  const user   = requireUser(chatId, msg.from.id);
+  if (!user) return;
+  try {
+    await bot.sendMessage(chatId, 'Pause reminders for how long?', {
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '1 day',   callback_data: 'pause:1'  },
+          { text: '3 days',  callback_data: 'pause:3'  },
+          { text: '7 days',  callback_data: 'pause:7'  },
+          { text: '2 weeks', callback_data: 'pause:14' },
+        ]],
+      },
+    });
+  } catch (err) {
+    errors.logError('/pause', err, msg.from.id);
+  }
+});
+
+// ── /resume ────────────────────────────────────────────────────────────────
+bot.onText(/\/resume/, async (msg) => {
+  const chatId = msg.chat.id;
+  const user   = requireUser(chatId, msg.from.id);
+  if (!user) return;
+  try {
+    db.pauseUser(msg.from.id, null);
+    await bot.sendMessage(chatId, '▶️ Resumed! Reminders are back on.');
+  } catch (err) {
+    errors.logError('/resume', err, msg.from.id);
+  }
+});
+
 // ── /config ────────────────────────────────────────────────────────────────
 bot.onText(/\/config/, async (msg) => {
   const chatId = msg.chat.id;
@@ -350,6 +440,7 @@ bot.onText(/\/admin/, async (msg) => {
       inline_keyboard: [
         [{ text: '📢 Broadcast',  callback_data: 'adm:broadcast' }],
         [{ text: '👥 List users', callback_data: 'adm:users'     }],
+        [{ text: '⚠️ Errors',    callback_data: 'adm:errors'    }],
       ],
     },
   });
@@ -362,7 +453,111 @@ bot.on('callback_query', async (q) => {
   const msgId      = message.message_id;
   const telegramId = from.id;
 
+  // Rate limiting: ignore if < 500ms since last callback from this user
+  const now = Date.now();
+  const last = lastCallback.get(telegramId) || 0;
+  if (now - last < 500) {
+    await bot.answerCallbackQuery(qId);
+    return;
+  }
+  lastCallback.set(telegramId, now);
+
+  try {
+
   await bot.answerCallbackQuery(qId);
+
+  // ── Onboarding: timezone selection ──────────────────────────────────────
+  if (data.startsWith('onb_tz:')) {
+    const tz = data.split(':').slice(1).join(':');
+    const { user } = db.getOrCreateUser(telegramId, from.username, from.first_name);
+    if (tz === 'custom') {
+      setState(String(telegramId), { step: 'onb_tz_custom', data: { userId: user.id } });
+      await bot.sendMessage(chatId, 'Type your timezone (e.g. America/New_York, Asia/Tokyo):', {
+        reply_markup: { force_reply: true },
+      });
+    } else {
+      db.updateUserTimezone(telegramId, tz);
+      setState(String(telegramId), { step: 'onb_pack', data: { userId: user.id } });
+      await bot.editMessageText(
+        `Step 2/3 — 🎯 Pick a starter pack (you can add more later):`,
+        {
+          chat_id: chatId, message_id: msgId,
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '💪 Fitness',   callback_data: 'onb_pack:fitness'   }, { text: '🥗 Nutrition', callback_data: 'onb_pack:nutrition' }],
+              [{ text: '💧 Wellness',  callback_data: 'onb_pack:wellness'  }, { text: '🧘 Recovery',  callback_data: 'onb_pack:recovery'  }],
+              [{ text: '🔀 All packs', callback_data: 'onb_pack:all'       }, { text: '✏️ Start empty', callback_data: 'onb_pack:empty'   }],
+            ],
+          },
+        }
+      );
+    }
+    return;
+  }
+
+  // ── Onboarding: habit pack selection ────────────────────────────────────
+  if (data.startsWith('onb_pack:')) {
+    const pack = data.split(':')[1];
+    const user = db.getUser(telegramId);
+    if (!user) return;
+    if (pack !== 'empty') db.seedHabitPack(user.id, pack);
+    setState(String(telegramId), { step: 'onb_time', data: { userId: user.id } });
+    await bot.editMessageText(
+      `Step 3/3 — ⏰ When should I remind you?`,
+      {
+        chat_id: chatId, message_id: msgId,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '7:30 🌅 + 21:30 🌙', callback_data: 'onb_time:07:30:21:30' }, { text: '8:00 🌅 + 22:00 🌙', callback_data: 'onb_time:08:00:22:00' }],
+            [{ text: '6:30 🌅 + 20:30 🌙', callback_data: 'onb_time:06:30:20:30' }, { text: '⚙️ I\'ll set manually', callback_data: 'onb_time:manual'         }],
+          ],
+        },
+      }
+    );
+    return;
+  }
+
+  // ── Onboarding: reminder time selection ─────────────────────────────────
+  if (data.startsWith('onb_time:')) {
+    const user = db.getUser(telegramId);
+    if (!user) return;
+    const parts = data.split(':');
+    const morning = parts[1] !== 'manual' ? `${parts[1]}:${parts[2]}` : '07:30';
+    const night   = parts[1] !== 'manual' ? `${parts[3]}:${parts[4]}` : '21:30';
+    db.setDefaultNotifications(user.id);
+    db.updateNotification(user.id, 'morning', morning);
+    db.updateNotification(user.id, 'night', night);
+    setState(String(telegramId), null); // clear state
+    state.delete(String(telegramId));
+    const habits = db.getHabits(user.id);
+    const habitList = habits.length
+      ? habits.map(h => `• ${h.habit_name}`).join('\n')
+      : '(No habits yet — use /addhabit to add some)';
+    await bot.editMessageText(
+      `✅ All set! Here are your habits:\n${habitList}\n\nType /log to check in or /help to explore.`,
+      { chat_id: chatId, message_id: msgId }
+    );
+    return;
+  }
+
+  // ── Pause callbacks ──────────────────────────────────────────────────────
+  if (data.startsWith('pause:')) {
+    const user = db.getUser(telegramId);
+    if (!user) return;
+    const days = parseInt(data.split(':')[1]);
+    const until = new Date();
+    until.setDate(until.getDate() + days);
+    const untilStr = until.toISOString().split('T')[0];
+    db.pauseUser(telegramId, untilStr);
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const d = until;
+    const dateLabel = `${months[d.getMonth()]} ${d.getDate()}`;
+    await bot.editMessageText(
+      `⏸ Paused until ${dateLabel}. I won't remind you until then. /resume to cancel.`,
+      { chat_id: chatId, message_id: msgId }
+    );
+    return;
+  }
 
   const user = db.getUser(telegramId);
   if (!user) return;
@@ -432,13 +627,13 @@ bot.on('callback_query', async (q) => {
     }
 
     // Note capture prompt
-    state.set(String(telegramId), { step: 'note_capture', data: { habitId, date } });
+    setState(String(telegramId), { step: 'note_capture', data: { habitId, date } });
     const noteMsg = await bot.sendMessage(chatId, '📝 Add a note? (type it or tap Skip)', {
       reply_markup: { inline_keyboard: [[{ text: 'Skip', callback_data: `skip_note:${habitId}:${date}` }]] },
     });
     const noteMsgId = noteMsg.message_id;
     setTimeout(() => {
-      const curr = state.get(String(telegramId));
+      const curr = getState(String(telegramId));
       if (curr && curr.step === 'note_capture') state.delete(String(telegramId));
       bot.deleteMessage(chatId, noteMsgId).catch(() => {});
     }, 120000);
@@ -492,14 +687,14 @@ bot.on('callback_query', async (q) => {
   // cfg:morning | cfg:night | cfg:tz
   if (data === 'cfg:morning' || data === 'cfg:night') {
     const type = data.split(':')[1];
-    state.set(String(telegramId), { step: `cfg_${type}`, data: {} });
+    setState(String(telegramId), { step: `cfg_${type}`, data: {} });
     await bot.sendMessage(chatId, `New ${type} time? (HH:MM, 24h — e.g. 07:30)`, {
       reply_markup: { force_reply: true },
     });
     return;
   }
   if (data === 'cfg:tz') {
-    state.set(String(telegramId), { step: 'cfg_tz', data: {} });
+    setState(String(telegramId), { step: 'cfg_tz', data: {} });
     await bot.sendMessage(chatId, 'Timezone? (e.g. America/New_York, Europe/London, Asia/Kolkata)', {
       reply_markup: { force_reply: true },
     });
@@ -509,7 +704,7 @@ bot.on('callback_query', async (q) => {
   // ── Flexible reminders ──────────────────────────────────────────────────
   // nadd — start add-reminder flow
   if (data === 'nadd') {
-    state.set(String(telegramId), { step: 'notif_label', data: {} });
+    setState(String(telegramId), { step: 'notif_label', data: {} });
     await bot.sendMessage(chatId,
       'Label for this reminder?\n(e.g. Morning, Afternoon, Lunch, Evening)',
       { reply_markup: { force_reply: true } }
@@ -520,7 +715,7 @@ bot.on('callback_query', async (q) => {
   // nef:{id} — edit reminder time
   if (data.startsWith('nef:')) {
     const notifId = parseInt(data.split(':')[1]);
-    state.set(String(telegramId), { step: 'notif_edit_time', data: { notifId } });
+    setState(String(telegramId), { step: 'notif_edit_time', data: { notifId } });
     await bot.sendMessage(chatId, 'New time for this reminder? (HH:MM, 24h — e.g. 13:00)', {
       reply_markup: { force_reply: true },
     });
@@ -538,11 +733,11 @@ bot.on('callback_query', async (q) => {
 
   // Category selection during /addhabit
   if (data.startsWith('cat:')) {
-    const s = state.get(String(telegramId));
+    const s = getState(String(telegramId));
     if (!s || s.step !== 'add_category') return;
     s.data.category = data.split(':')[1];
     s.step = 'add_target';
-    state.set(String(telegramId), s);
+    setState(String(telegramId), s);
     await bot.editMessageText(`Category: ${s.data.category}`, { chat_id: chatId, message_id: msgId });
     await bot.sendMessage(chatId, 'Target? (e.g. 150 reps, 3L, or type skip)', {
       reply_markup: { force_reply: true },
@@ -552,7 +747,7 @@ bot.on('callback_query', async (q) => {
 
   // Notify slot selection during /addhabit
   if (data.startsWith('slot:')) {
-    const s = state.get(String(telegramId));
+    const s = getState(String(telegramId));
     if (!s || s.step !== 'add_slot') return;
     const slot = data.split(':')[1]; // morning | night | both
     db.addHabit(
@@ -615,7 +810,7 @@ bot.on('callback_query', async (q) => {
       });
     } else {
       const prompt = field === 'name' ? 'New name?' : 'New target? (e.g. 3L, 150 reps, or type skip)';
-      state.set(String(telegramId), { step: `edit_${field}`, data: { habitId: parseInt(habitId) } });
+      setState(String(telegramId), { step: `edit_${field}`, data: { habitId: parseInt(habitId) } });
       await bot.sendMessage(chatId, prompt, { reply_markup: { force_reply: true } });
     }
     return;
@@ -635,13 +830,22 @@ bot.on('callback_query', async (q) => {
 
   if (data.startsWith('adm:') && String(telegramId) === String(config.ADMIN_ID)) {
     if (data === 'adm:broadcast') {
-      state.set(String(telegramId), { step: 'adm_broadcast', data: {} });
+      setState(String(telegramId), { step: 'adm_broadcast', data: {} });
       await bot.sendMessage(chatId, 'Broadcast message:', { reply_markup: { force_reply: true } });
     } else if (data === 'adm:users') {
       const users = db.getAllUsers().slice(-20);
       const lines = users.map(u => `• ${u.first_name || u.username || u.telegram_id}`).join('\n');
       await bot.sendMessage(chatId, `*Users:*\n${lines}`, { parse_mode: 'Markdown' });
+    } else if (data === 'adm:errors') {
+      const recent = errors.getRecent(10);
+      if (!recent.length) return bot.sendMessage(chatId, 'No errors logged.');
+      const lines = recent.map(e => `[${e.ts.slice(11,19)}] ${e.context}: ${e.message}`);
+      await bot.sendMessage(chatId, `*Recent errors:*\n\`\`\`\n${lines.join('\n')}\n\`\`\``, { parse_mode: 'Markdown' });
     }
+  }
+
+  } catch (err) {
+    errors.logError('callback', err, telegramId);
   }
 });
 
@@ -652,17 +856,41 @@ bot.on('message', async (msg) => {
   const telegramId = msg.from.id;
   const chatId     = msg.chat.id;
   const text       = msg.text.trim();
-  const s          = state.get(String(telegramId));
+  const s          = getState(String(telegramId));
   if (!s) return;
 
   const user = db.getUser(telegramId);
 
   switch (s.step) {
 
+    case 'onb_tz_custom': {
+      try {
+        new Intl.DateTimeFormat('en', { timeZone: text }).format();
+        const { user: onbUser } = db.getOrCreateUser(telegramId, '', '');
+        db.updateUserTimezone(telegramId, text);
+        setState(String(telegramId), { step: 'onb_pack', data: { userId: onbUser.id } });
+        await bot.sendMessage(chatId,
+          `Step 2/3 — 🎯 Pick a starter pack (you can add more later):`,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: '💪 Fitness',   callback_data: 'onb_pack:fitness'   }, { text: '🥗 Nutrition', callback_data: 'onb_pack:nutrition' }],
+                [{ text: '💧 Wellness',  callback_data: 'onb_pack:wellness'  }, { text: '🧘 Recovery',  callback_data: 'onb_pack:recovery'  }],
+                [{ text: '🔀 All packs', callback_data: 'onb_pack:all'       }, { text: '✏️ Start empty', callback_data: 'onb_pack:empty'   }],
+              ],
+            },
+          }
+        );
+      } catch {
+        await bot.sendMessage(chatId, 'Invalid timezone. Try America/New_York or Asia/Kolkata.');
+      }
+      break;
+    }
+
     case 'add_name':
       s.data.name = text.slice(0, 80);
       s.step = 'add_category';
-      state.set(String(telegramId), s);
+      setState(String(telegramId), s);
       await bot.sendMessage(chatId, 'Category?', {
         reply_markup: {
           inline_keyboard: [
@@ -683,7 +911,7 @@ bot.on('message', async (msg) => {
     case 'add_target':
       s.data.target = text.toLowerCase() === 'skip' ? null : text;
       s.step = 'add_slot';
-      state.set(String(telegramId), s);
+      setState(String(telegramId), s);
       await bot.sendMessage(chatId, 'Remind in?', {
         reply_markup: {
           inline_keyboard: [[
@@ -715,7 +943,7 @@ bot.on('message', async (msg) => {
     case 'notif_label': {
       s.data.label = text.slice(0, 30);
       s.step = 'notif_time';
-      state.set(String(telegramId), s);
+      setState(String(telegramId), s);
       await bot.sendMessage(chatId,
         `Time for *${s.data.label}* reminder? (HH:MM, 24h — e.g. 13:00)`,
         { parse_mode: 'Markdown', reply_markup: { force_reply: true } }
@@ -833,7 +1061,10 @@ async function sendCheckin(user, type) {
 }
 
 // ── Weekly report sender (called by scheduler) ────────────────────────────
-async function sendWeeklyReport(user) {
+async function sendWeeklyReport(user, coachMsg) {
+  if (coachMsg) {
+    await bot.sendMessage(user.telegram_id, coachMsg, { parse_mode: 'Markdown' });
+  }
   await bot.sendMessage(user.telegram_id, dashboard.generateReport(user), { parse_mode: 'Markdown' });
 }
 

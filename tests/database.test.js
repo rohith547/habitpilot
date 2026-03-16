@@ -334,3 +334,136 @@ describe('getUsersWithNoLogsToday', () => {
     expect(result.some(r => r.id === u.id)).toBe(false)
   })
 })
+
+// ── HABIT_PACKS ──────────────────────────────────────────────────────────────
+describe('HABIT_PACKS', () => {
+  it('has exactly 4 packs', () => {
+    expect(Object.keys(db.HABIT_PACKS)).toHaveLength(4)
+  })
+
+  it('each pack has exactly 4 habits', () => {
+    for (const pack of Object.values(db.HABIT_PACKS)) {
+      expect(pack).toHaveLength(4)
+    }
+  })
+
+  it('fitness pack has correct habits', () => {
+    const names = db.HABIT_PACKS.fitness.map(h => h.name)
+    expect(names).toContain('Morning walk')
+    expect(names).toContain('Pushups')
+    expect(names).toContain('Squats')
+    expect(names).toContain('Stretch')
+  })
+
+  it('nutrition pack has correct habits', () => {
+    const names = db.HABIT_PACKS.nutrition.map(h => h.name)
+    expect(names).toContain('Healthy breakfast')
+    expect(names).toContain('Greens')
+  })
+
+  it('wellness pack has correct habits', () => {
+    const names = db.HABIT_PACKS.wellness.map(h => h.name)
+    expect(names).toContain('Water intake')
+    expect(names).toContain('Meditation')
+  })
+
+  it('recovery pack has correct habits', () => {
+    const names = db.HABIT_PACKS.recovery.map(h => h.name)
+    expect(names).toContain('Stretch')
+    expect(names).toContain('Cold shower')
+  })
+})
+
+// ── seedHabitPack ────────────────────────────────────────────────────────────
+describe('seedHabitPack', () => {
+  let user
+
+  beforeEach(() => {
+    user = makeUser(String(Date.now() + Math.random()))
+  })
+
+  it('seeds fitness pack with 4 habits', () => {
+    db.seedHabitPack(user.id, 'fitness')
+    const habits = db.getHabits(user.id)
+    expect(habits).toHaveLength(4)
+  })
+
+  it('seeds nutrition pack with 4 habits', () => {
+    db.seedHabitPack(user.id, 'nutrition')
+    const habits = db.getHabits(user.id)
+    expect(habits).toHaveLength(4)
+  })
+
+  it('seeds wellness pack with 4 habits', () => {
+    db.seedHabitPack(user.id, 'wellness')
+    const habits = db.getHabits(user.id)
+    expect(habits).toHaveLength(4)
+  })
+
+  it('seeds recovery pack with 4 habits', () => {
+    db.seedHabitPack(user.id, 'recovery')
+    const habits = db.getHabits(user.id)
+    expect(habits).toHaveLength(4)
+  })
+
+  it('seeds all packs (all = 14 unique habits, deduped by name)', () => {
+    db.seedHabitPack(user.id, 'all')
+    const habits = db.getHabits(user.id)
+    expect(habits).toHaveLength(14) // 16 total - 2 duplicates (Stretch, Meditation)
+  })
+
+  it('seeds correct habit names for fitness', () => {
+    db.seedHabitPack(user.id, 'fitness')
+    const names = db.getHabits(user.id).map(h => h.habit_name)
+    expect(names).toContain('Pushups')
+    expect(names).toContain('Squats')
+  })
+
+  it('is idempotent (INSERT OR IGNORE)', () => {
+    db.seedHabitPack(user.id, 'fitness')
+    db.seedHabitPack(user.id, 'fitness')
+    const habits = db.getHabits(user.id)
+    expect(habits).toHaveLength(4)
+  })
+})
+
+// ── pauseUser / isUserPaused ─────────────────────────────────────────────────
+describe('pauseUser / isUserPaused', () => {
+  let user
+
+  beforeEach(() => {
+    user = makeUser(String(Date.now() + Math.random()))
+  })
+
+  it('isUserPaused returns false by default', () => {
+    expect(db.isUserPaused(user)).toBe(false)
+  })
+
+  it('pauseUser sets a future date and isUserPaused returns true', () => {
+    const future = new Date()
+    future.setDate(future.getDate() + 5)
+    const untilStr = future.toISOString().split('T')[0]
+    db.pauseUser(user.telegram_id, untilStr)
+    const updated = db.getUser(user.telegram_id)
+    expect(db.isUserPaused(updated)).toBe(true)
+  })
+
+  it('isUserPaused returns false after resume (null)', () => {
+    const future = new Date()
+    future.setDate(future.getDate() + 5)
+    db.pauseUser(user.telegram_id, future.toISOString().split('T')[0])
+    db.pauseUser(user.telegram_id, null)
+    const updated = db.getUser(user.telegram_id)
+    expect(db.isUserPaused(updated)).toBe(false)
+  })
+
+  it('auto-expires: isUserPaused returns false for past date and clears it', () => {
+    const past = '2020-01-01'
+    db.pauseUser(user.telegram_id, past)
+    const updated = db.getUser(user.telegram_id)
+    expect(db.isUserPaused(updated)).toBe(false)
+    // Should have been cleared
+    const afterExpiry = db.getUser(user.telegram_id)
+    expect(afterExpiry.paused_until).toBeNull()
+  })
+})

@@ -1,12 +1,33 @@
 const cron = require('node-cron');
 const db   = require('./database');
 const { getUserTime, getToday } = require('./habits');
+const errors = require('./errors');
 
 // In-memory Set for missed-day nudge tracking (cleared at midnight)
 const nudgedToday = new Set();
 
 // Weekly report tracking: userId → YYYY-MM-DD (Sunday's date)
 const weeklyReportSent = new Map();
+
+// ── Coach message generator ────────────────────────────────────────────────
+function coachMessage(user, weekScore, lastWeekScore, bestEverScore) {
+  const diff = weekScore - lastWeekScore;
+  const name = user.first_name || 'there';
+
+  if (weekScore >= 90)
+    return `🎉 *Incredible week, ${name}!* ${weekScore}% — you're absolutely crushing it. Keep this momentum going!`;
+  if (weekScore > bestEverScore - 5 && weekScore >= 70)
+    return `🏆 *One of your best weeks ever, ${name}!* ${weekScore}%. You're building something real here.`;
+  if (diff >= 15)
+    return `📈 *Big improvement, ${name}!* Up ${diff}% from last week. Whatever you changed — keep doing it.`;
+  if (diff <= -15)
+    return `💪 *Bounce-back time, ${name}.* Last week was ${lastWeekScore}%, this week ${weekScore}%. Pick one habit to focus on this week.`;
+  if (weekScore >= 70)
+    return `✅ *Solid week, ${name}.* ${weekScore}% — consistent and steady. Consistency beats perfection.`;
+  if (weekScore >= 50)
+    return `🔄 *Making progress, ${name}.* ${weekScore}% this week. Small steps still count.`;
+  return `👋 *Hey ${name},* ${weekScore}% this week. Every streak starts with day 1 — /log to begin yours.`;
+}
 
 // Runs every minute — checks each user's notification schedule
 cron.schedule('* * * * *', async () => {
@@ -16,6 +37,7 @@ cron.schedule('* * * * *', async () => {
 
     for (const user of users) {
       try {
+        if (db.isUserPaused(user)) continue;
         const userTime = getUserTime(user.timezone);
         const userDate = getToday(user.timezone);
         const notifs   = db.getNotifications(user.id);
@@ -27,11 +49,11 @@ cron.schedule('* * * * *', async () => {
           }
         }
       } catch (err) {
-        console.error(`[Scheduler] User ${user.id}:`, err.message);
+        errors.logError('scheduler:checkin', err, user.telegram_id);
       }
     }
   } catch (err) {
-    console.error('[Scheduler]', err.message);
+    errors.logError('scheduler:checkin:outer', err);
   }
 });
 
@@ -42,19 +64,49 @@ cron.schedule('* * * * *', async () => {
     const users = db.getAllUsers();
     for (const user of users) {
       try {
+        if (db.isUserPaused(user)) continue;
         const userTime = getUserTime(user.timezone);
         const userDate = getToday(user.timezone);
         const dayOfWeek = new Date(userDate + 'T12:00:00').getDay(); // 0=Sunday
         if (dayOfWeek === 0 && userTime === '08:00' && weeklyReportSent.get(user.id) !== userDate) {
           weeklyReportSent.set(user.id, userDate);
-          await sendWeeklyReport(user);
+          // Compute scores for coach message
+          const { getRangeLogs, getHabits } = require('./database');
+          const habits = getHabits(user.id);
+          const weekStart = new Date(userDate + 'T12:00:00'); weekStart.setDate(weekStart.getDate() - 6);
+          const prevStart = new Date(weekStart); prevStart.setDate(prevStart.getDate() - 7);
+          const weekStartStr = weekStart.toISOString().slice(0, 10);
+          const prevStartStr = prevStart.toISOString().slice(0, 10);
+          const prevEnd = new Date(weekStart); prevEnd.setDate(prevEnd.getDate() - 1);
+          const prevEndStr = prevEnd.toISOString().slice(0, 10);
+          const allLogs  = getRangeLogs(user.id, '2020-01-01', userDate);
+          const weekLogs = getRangeLogs(user.id, weekStartStr, userDate);
+          const prevLogs = getRangeLogs(user.id, prevStartStr, prevEndStr);
+          function calcScore(logs, days) {
+            if (!habits.length) return 0;
+            return Math.min(100, Math.round(logs.reduce((s, l) => s + l.completion_value, 0) / (days * habits.length * 100) * 100));
+          }
+          const weekScore     = calcScore(weekLogs, 7);
+          const lastWeekScore = calcScore(prevLogs, 7);
+          // Best ever: scan all weeks
+          let bestEver = 0;
+          if (allLogs.length) {
+            const dates = [...new Set(allLogs.map(l => l.date))].sort();
+            for (let i = 0; i < dates.length; i += 7) {
+              const chunk = allLogs.filter(l => l.date >= dates[i] && l.date <= (dates[Math.min(i+6, dates.length-1)] || dates[i]));
+              const s = calcScore(chunk, 7);
+              if (s > bestEver) bestEver = s;
+            }
+          }
+          const coach = coachMessage(user, weekScore, lastWeekScore, bestEver);
+          await sendWeeklyReport(user, coach);
         }
       } catch (err) {
-        console.error(`[Scheduler] Weekly report user ${user.id}:`, err.message);
+        errors.logError('scheduler:weekly', err, user.telegram_id);
       }
     }
   } catch (err) {
-    console.error('[Scheduler] Weekly report:', err.message);
+    errors.logError('scheduler:weekly:outer', err);
   }
 });
 
@@ -64,6 +116,7 @@ cron.schedule('* * * * *', async () => {
     const users = db.getAllUsers();
     for (const user of users) {
       try {
+        if (db.isUserPaused(user)) continue;
         const userTime = getUserTime(user.timezone);
         const userDate = getToday(user.timezone);
         const nudgeKey = `${user.id}:${userDate}`;
@@ -78,11 +131,11 @@ cron.schedule('* * * * *', async () => {
           }
         }
       } catch (err) {
-        console.error(`[Scheduler] Nudge user ${user.id}:`, err.message);
+        errors.logError('scheduler:nudge', err, user.telegram_id);
       }
     }
   } catch (err) {
-    console.error('[Scheduler] Nudge:', err.message);
+    errors.logError('scheduler:nudge:outer', err);
   }
 });
 

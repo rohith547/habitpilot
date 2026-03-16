@@ -7,6 +7,8 @@ let db;
 
 function getDb() {
   if (db) return db;
+  const isEphemeral = !config.DB_PATH.startsWith('/data');
+  if (isEphemeral) console.warn('[DB] ⚠️  Running on ephemeral storage. Add Railway Volume mounted at /data and set DB_PATH=/data/habits.db');
   const dir = path.dirname(config.DB_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   db = new Database(config.DB_PATH);
@@ -64,6 +66,7 @@ function initSchema() {
     );
   `);
   try { db.exec('ALTER TABLE habit_logs ADD COLUMN note TEXT'); } catch(e) {}
+  try { db.exec('ALTER TABLE users ADD COLUMN paused_until TEXT DEFAULT NULL'); } catch(e) {}
 }
 
 // ── Users ──────────────────────────────────────────────────────────────────
@@ -324,6 +327,62 @@ function getUsersWithNoLogsToday(dateStr) {
   ).all(dateStr);
 }
 
+// ── Pause / vacation mode ──────────────────────────────────────────────────
+function pauseUser(telegramId, until) {
+  db.prepare('UPDATE users SET paused_until = ? WHERE telegram_id = ?').run(until, String(telegramId));
+}
+
+function isUserPaused(user) {
+  if (!user.paused_until) return false;
+  const today = new Date().toISOString().split('T')[0];
+  if (user.paused_until < today) {
+    db.prepare('UPDATE users SET paused_until = NULL WHERE id = ?').run(user.id);
+    return false;
+  }
+  return true;
+}
+
+// ── Habit packs ────────────────────────────────────────────────────────────
+const HABIT_PACKS = {
+  fitness: [
+    { name: 'Morning walk',  cat: 'exercise',   target: '30 min' },
+    { name: 'Pushups',       cat: 'exercise',   target: '100'    },
+    { name: 'Squats',        cat: 'exercise',   target: '100'    },
+    { name: 'Stretch',       cat: 'recovery',   target: null     },
+  ],
+  nutrition: [
+    { name: 'Healthy breakfast', cat: 'food',       target: null  },
+    { name: 'Greens',            cat: 'food',       target: null  },
+    { name: 'No junk food',      cat: 'food',       target: null  },
+    { name: 'Daily vitamins',    cat: 'supplement', target: null  },
+  ],
+  wellness: [
+    { name: 'Water intake',  cat: 'hydration',  target: '3L'     },
+    { name: 'Vitamins',      cat: 'supplement', target: null     },
+    { name: 'Meditation',    cat: 'recovery',   target: '10 min' },
+    { name: 'Sleep by 11pm', cat: 'recovery',   target: null     },
+  ],
+  recovery: [
+    { name: 'Stretch',          cat: 'recovery',  target: '15 min' },
+    { name: 'Cold shower',      cat: 'recovery',  target: null     },
+    { name: 'Meditation',       cat: 'recovery',  target: '10 min' },
+    { name: 'Screen-free hour', cat: 'recovery',  target: null     },
+  ],
+};
+
+function seedHabitPack(userId, packName) {
+  const habits = packName === 'all'
+    ? Object.values(HABIT_PACKS).flat()
+    : HABIT_PACKS[packName] || [];
+  const checkStmt  = db.prepare('SELECT id FROM habits WHERE user_id = ? AND habit_name = ? AND active = 1');
+  const insertStmt = db.prepare(`INSERT INTO habits (user_id, habit_name, category, target_value, notify_morning, notify_night) VALUES (?, ?, ?, ?, 1, 1)`);
+  for (const h of habits) {
+    if (!checkStmt.get(userId, h.name)) {
+      insertStmt.run(userId, h.name, h.cat, h.target || null);
+    }
+  }
+}
+
 module.exports = {
   getDb,
   getOrCreateUser, getUser, updateUserTimezone, getAllUsers, getActiveUsers,
@@ -334,4 +393,6 @@ module.exports = {
   getStreak,
   getHabitStreak, getHabitPersonalBest, getHabitCalendar,
   updateLogNote, updateHabitOrder, getHabitStats, getUsersWithNoLogsToday,
+  pauseUser, isUserPaused,
+  HABIT_PACKS, seedHabitPack,
 };
