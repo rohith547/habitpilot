@@ -265,6 +265,7 @@ function generateReport(user) {
     `🗓 *THIS WEEK*  (${weekLabel(week.start)}–${weekLabel(week.end)})`,
     `━━━━━━━━━━━━━━━━`,
     `${scoreEmoji(thisWeekScore)} *${thisWeekScore}%*  ${trend}`,
+    momentumLabel(getMomentumScore(user, habits)),
     `\`${bar(thisWeekScore)}\``,
     ``,
     `\`${dayLabels.join('  ')}\``,
@@ -339,4 +340,37 @@ function generateReport(user) {
   return lines.join('\n');
 }
 
-module.exports = { generateReport, consistencyScore };
+// ── Momentum score ─────────────────────────────────────────────────────────
+function getMomentumScore(user, habits) {
+  if (!habits.length) return 0;
+  const tz = user.timezone;
+  const week = dateRange(7, tz);
+  const prev = dateRange(14, tz);
+  const long = dateRange(90, tz);
+  const weekLogs = db.getRangeLogs(user.id, week.start, week.end);
+  const prevLogs = db.getRangeLogs(user.id, prev.start, prev.dates[6]);
+  const longLogs = db.getRangeLogs(user.id, long.start, long.end);
+  const curStreak = currentStreak(habits, longLogs, tz);
+  const streakComponent = Math.min(curStreak / 14 * 100, 100) * 0.35;
+  const sevenDayAvg = habits.length
+    ? Math.round(weekLogs.reduce((s, l) => s + l.completion_value, 0) / (7 * habits.length * 100) * 100)
+    : 0;
+  const consistencyComponent = sevenDayAvg * 0.40;
+  const thisWeekScore = periodScore(habits, weekLogs, week.dates);
+  const lastWeekScore = periodScore(habits, prevLogs, prev.dates.slice(0, 7));
+  let trendComponent;
+  if (thisWeekScore > lastWeekScore) trendComponent = 25;
+  else if (thisWeekScore === lastWeekScore) trendComponent = 15;
+  else trendComponent = Math.max(0, 25 - (lastWeekScore - thisWeekScore));
+  return Math.round(streakComponent + consistencyComponent + trendComponent);
+}
+
+function momentumLabel(score) {
+  if (score >= 85) return `⚡ Momentum: ${score} — On fire 🔥`;
+  if (score >= 70) return `💪 Momentum: ${score} — Strong`;
+  if (score >= 50) return `📈 Momentum: ${score} — Building`;
+  if (score >= 30) return `⚠️ Momentum: ${score} — Recovering`;
+  return `💤 Momentum: ${score} — Getting started`;
+}
+
+module.exports = { generateReport, consistencyScore, getMomentumScore, momentumLabel };

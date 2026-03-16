@@ -28,6 +28,10 @@ bot.setMyCommands([
   { command: 'resume',      description: '▶️ Resume reminders' },
   { command: 'help',        description: '❓ Show all commands' },
   { command: 'start',       description: '🚀 Register / reset' },
+  { command: 'freeze',   description: '🧊 Streak freeze — protect your streak' },
+  { command: 'insights', description: '💡 Habit correlations & insights' },
+  { command: 'compound', description: '📈 Compound effect calculator' },
+  { command: 'share',    description: '🌟 Share your stats card' },
 ]).catch(err => console.error('[Bot] setMyCommands failed:', err.message));
 
 // In-memory conversation state: telegramId → { step, data, _ts }
@@ -239,8 +243,10 @@ bot.onText(/\/status/, async (msg) => {
   if (score > sevenDayAvg + 10) trend = `📈 +${score - sevenDayAvg}% vs avg`;
   else if (score < sevenDayAvg - 10) trend = `📉 -${sevenDayAvg - score}% vs avg`;
 
+  const momentumScore = dashboard.getMomentumScore(user, habits);
+  const momentumLine = dashboard.momentumLabel(momentumScore);
   await bot.sendMessage(chatId,
-    `*${date}*\n\n${lines.join('\n')}\n\n✅ ${done}/${habits.length} — *${score}%* ${trend}`,
+    `*${date}*\n\n${lines.join('\n')}\n\n✅ ${done}/${habits.length} — *${score}%* ${trend}\n${momentumLine}`,
     { parse_mode: 'Markdown', reply_markup: buildAllDoneKeyboard(date) }
   );
 });
@@ -446,6 +452,211 @@ bot.onText(/\/admin/, async (msg) => {
   });
 });
 
+// ── /freeze ────────────────────────────────────────────────────────────────
+bot.onText(/\/freeze/, async (msg) => {
+  const chatId = msg.chat.id;
+  const user   = requireUser(chatId, msg.from.id);
+  if (!user) return;
+  try {
+    const freezeData = db.getStreakFreezes(user.id);
+    const count = freezeData ? freezeData.streak_freezes : 0;
+    const lastUsed = freezeData && freezeData.freeze_used_date ? freezeData.freeze_used_date : 'never';
+    await bot.sendMessage(chatId,
+      `🧊 *Streak Freezes*\n\nYou have *${count}* freeze(s) available (max 3).\n\nEarn 1 freeze every 7-day streak.\nUsed automatically when you miss a day (with your permission).\n\nLast used: ${lastUsed}`,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    errors.logError('/freeze', err, msg.from.id);
+  }
+});
+
+// ── /insights ──────────────────────────────────────────────────────────────
+bot.onText(/\/insights/, async (msg) => {
+  const chatId = msg.chat.id;
+  const user   = requireUser(chatId, msg.from.id);
+  if (!user) return;
+  try {
+    const correlations = db.getCorrelations(user.id);
+    if (!correlations.length) {
+      await bot.sendMessage(chatId,
+        `💡 *HABIT INSIGHTS*  (last 60 days)\n━━━━━━━━━━━━━━━━\n\n📊 Keep logging! Insights appear after 10 days of data.`,
+        { parse_mode: 'Markdown' }
+      );
+      return;
+    }
+    const lines = [
+      `💡 *HABIT INSIGHTS*  (last 60 days)`,
+      `━━━━━━━━━━━━━━━━`,
+      ``,
+      `🔗 *Habit Correlations*`,
+    ];
+    for (const c of correlations) {
+      lines.push(`On days you do *${c.habitA}*, you complete *${c.habitB}* ${c.correlation}% of the time`);
+      lines.push(`(vs your ${c.baseline}% baseline — 🔺 +${c.lift}%)`);
+      lines.push(``);
+    }
+    lines.push(`💡 These habits reinforce each other. Do them together!`);
+    lines.push(``);
+    lines.push(`_(Need 10+ days of data for correlations to appear)_`);
+    await bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown' });
+  } catch (err) {
+    errors.logError('/insights', err, msg.from.id);
+  }
+});
+
+// ── /compound ──────────────────────────────────────────────────────────────
+bot.onText(/^\/compound$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const user   = requireUser(chatId, msg.from.id);
+  if (!user) return;
+  const habits = db.getHabits(user.id);
+  if (!habits.length) return bot.sendMessage(chatId, 'No habits. Use /addhabit.');
+  await bot.sendMessage(chatId, 'Which habit?', {
+    reply_markup: {
+      inline_keyboard: habits.map(h => [{
+        text: `${categoryEmoji(h.category)} ${h.habit_name}`,
+        callback_data: `cpd:${h.id}`,
+      }]),
+    },
+  });
+});
+
+bot.onText(/\/compound\s+(.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const user   = requireUser(chatId, msg.from.id);
+  if (!user) return;
+  try {
+    const query  = match[1].trim();
+    const habits = db.getHabits(user.id);
+    const habit  = habits.find(h => fuzzyMatch(query, h.habit_name));
+    if (!habit) {
+      await bot.sendMessage(chatId, `❓ No habit matched *"${query}"*. Pick one:`, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: habits.map(h => [{ text: `${categoryEmoji(h.category)} ${h.habit_name}`, callback_data: `cpd:${h.id}` }]) },
+      });
+      return;
+    }
+    await sendCompoundEffect(chatId, user, habit);
+  } catch (err) {
+    errors.logError('/compound', err, msg.from.id);
+  }
+});
+
+async function sendCompoundEffect(chatId, user, habit) {
+  const { extractNumber } = require('./habits');
+  const stats = db.getHabitStats(user.id, habit.id, 30);
+  const rate = stats.logged ? Math.round(stats.avgCompletion) : 0;
+  const currentRate = stats.logged ? Math.round(stats.logged / 30 * 100) : 0;
+  const numericTarget = extractNumber(habit.target_value);
+  const emoji = categoryEmoji(habit.category);
+  if (numericTarget) {
+    const perDay = numericTarget;
+    const at90   = Math.round(perDay * 90 * 0.90);
+    const at100  = perDay * 90;
+    const atCurr = Math.round(perDay * 90 * currentRate / 100);
+    const atYr90  = Math.round(perDay * 365 * 0.90);
+    const atYr100 = perDay * 365;
+    const atYrCurr = Math.round(perDay * 365 * currentRate / 100);
+    const yearGap  = atYr90 - atYrCurr;
+    await bot.sendMessage(chatId, [
+      `${emoji} *${habit.habit_name} — Compound Effect*`,
+      ``,
+      `Your current rate: ${currentRate}% (last 30 days)`,
+      ``,
+      `📅 In 90 days:`,
+      `  At current pace: ~${atCurr.toLocaleString()} ${habit.target_value}`,
+      `  At 90%: ~${at90.toLocaleString()} ${habit.target_value}`,
+      `  At 100%: ~${at100.toLocaleString()} ${habit.target_value}`,
+      ``,
+      `📅 In 1 year:`,
+      `  At current pace: ~${atYrCurr.toLocaleString()} ${habit.target_value}`,
+      `  At 90%: ~${atYr90.toLocaleString()} ${habit.target_value}`,
+      `  At 100%: ~${atYr100.toLocaleString()} ${habit.target_value}`,
+      ``,
+      `💡 Closing the gap from ${currentRate}% → 90% adds ${yearGap.toLocaleString()} ${habit.target_value} per year.`,
+    ].join('\n'), { parse_mode: 'Markdown' });
+  } else {
+    const at90    = Math.round(90 * 0.90);
+    const at100   = 90;
+    const atCurr  = Math.round(90 * currentRate / 100);
+    const atYr90  = Math.round(365 * 0.90);
+    const atYr100 = 365;
+    const atYrCurr = Math.round(365 * currentRate / 100);
+    await bot.sendMessage(chatId, [
+      `${emoji} *${habit.habit_name} — Compound Effect*`,
+      ``,
+      `Your current rate: ${currentRate}% (last 30 days)`,
+      ``,
+      `📅 In 90 days:`,
+      `  At current pace: ${atCurr} days completed`,
+      `  At 90%: ${at90} days`,
+      `  At 100%: ${at100} days`,
+      ``,
+      `📅 In 1 year:`,
+      `  At current pace: ${atYrCurr} days`,
+      `  At 90%: ${atYr90} days`,
+      `  At 100%: ${atYr100} days`,
+      ``,
+      `💡 One extra day per week would add 52 days per year.`,
+    ].join('\n'), { parse_mode: 'Markdown' });
+  }
+}
+
+// ── /share ─────────────────────────────────────────────────────────────────
+bot.onText(/\/share/, async (msg) => {
+  const chatId = msg.chat.id;
+  const user   = requireUser(chatId, msg.from.id);
+  if (!user) return;
+  try {
+    const habits = db.getHabits(user.id);
+    if (!habits.length) return bot.sendMessage(chatId, 'No habits yet. Use /addhabit to get started.');
+
+    const date   = getToday(user.timezone);
+    const allLogs = db.getRangeLogs(user.id, '2020-01-01', date);
+    const firstLogDate = allLogs.length ? allLogs[0].date : date;
+    const dayNumber = Math.max(1, Math.round((new Date(date + 'T12:00:00') - new Date(firstLogDate + 'T12:00:00')) / 86400000) + 1);
+
+    const streak = db.getStreak(user.id);
+    const weekDates = getRangeDates(7, user.timezone);
+    const weekLogs  = db.getRangeLogs(user.id, weekDates[0], weekDates[weekDates.length - 1]);
+    const overallScore = habits.length
+      ? Math.round(weekLogs.reduce((s, l) => s + l.completion_value, 0) / (7 * habits.length * 100) * 100)
+      : 0;
+
+    // Best habit last 7 days
+    const bestHabit = habits.map(h => {
+      const hLogs = weekLogs.filter(l => l.habit_id === h.id);
+      const pct   = hLogs.length ? Math.round(hLogs.reduce((s, l) => s + l.completion_value, 0) / (7 * 100) * 100) : 0;
+      return { name: h.habit_name, pct };
+    }).sort((a, b) => b.pct - a.pct)[0];
+
+    const momentumScore = dashboard.getMomentumScore(user, habits);
+    const name = user.first_name || user.username || 'You';
+
+    const filled = Math.round(overallScore / 10);
+    const progressBar = '█'.repeat(filled) + '░'.repeat(10 - filled);
+
+    const card = [
+      `┌─────────────────────────┐`,
+      `│  🌱 HabitPilot          │`,
+      `│                         │`,
+      `│  ${name} · Day ${dayNumber}${' '.repeat(Math.max(0, 13 - name.length - String(dayNumber).length))}│`,
+      `│  ${progressBar}  ${String(overallScore).padStart(3)}%  │`,
+      `│                         │`,
+      `│  🔥 Streak: ${streak} days${' '.repeat(Math.max(0, 9 - String(streak).length))}│`,
+      `│  🏆 Best: ${bestHabit ? bestHabit.name.slice(0, 10) : 'N/A'} ${bestHabit ? bestHabit.pct : 0}%${' '.repeat(Math.max(0, 6 - (bestHabit ? bestHabit.name.slice(0, 10).length + String(bestHabit.pct).length : 3)))}│`,
+      `│  ⚡ Momentum: ${momentumScore}${' '.repeat(Math.max(0, 12 - String(momentumScore).length))}│`,
+      `└─────────────────────────┘`,
+      ``,
+      `_Built with @HabitPilotBot_`,
+    ].join('\n');
+
+    await bot.sendMessage(chatId, `\`\`\`\n${card}\n\`\`\`\n\n_Built with @HabitPilotBot_`, { parse_mode: 'Markdown' });
+  } catch (err) {
+    errors.logError('/share', err, msg.from.id);
+  }
+});
+
 // ── Callback queries ───────────────────────────────────────────────────────
 bot.on('callback_query', async (q) => {
   const { id: qId, from, message, data } = q;
@@ -626,6 +837,28 @@ bot.on('callback_query', async (q) => {
       }
     }
 
+    // Milestone celebrations
+    const habitStreak = db.getHabitStreak(user.id, habitId);
+    const overallStreak = db.getStreak(user.id);
+    const MILESTONE_MESSAGES = {
+      3:   `🌱 *3-day streak!* You're building momentum. Most people quit here — you didn't.`,
+      7:   `🎉 *1 week streak!* Research shows you're now 40% more likely to stick with it.`,
+      14:  `💪 *2 weeks!* Your brain is starting to form the neural pathway. Keep going.`,
+      21:  `🧠 *21 days!* The habit is entering your subconscious. You're over the hardest part.`,
+      30:  `🏅 *30 days!* One month of consistency. That's genuinely rare.`,
+      50:  `⚡ *50 days!* You're in the top 5% of habit builders. Seriously impressive.`,
+      66:  `🏆 *66 days!* Science says this is now automatic behavior. This is who you ARE.`,
+      100: `👑 *100 days!* Elite level. You've built something permanent.`,
+    };
+    const perHabitMilestone = db.checkAndCelebrateMilestone(user.id, habitId, habitStreak);
+    if (perHabitMilestone && MILESTONE_MESSAGES[perHabitMilestone]) {
+      bot.sendMessage(chatId, MILESTONE_MESSAGES[perHabitMilestone], { parse_mode: 'Markdown' }).catch(() => {});
+    }
+    const overallMilestone = db.checkAndCelebrateMilestone(user.id, null, overallStreak);
+    if (overallMilestone && MILESTONE_MESSAGES[overallMilestone]) {
+      bot.sendMessage(chatId, MILESTONE_MESSAGES[overallMilestone], { parse_mode: 'Markdown' }).catch(() => {});
+    }
+
     // Note capture prompt
     setState(String(telegramId), { step: 'note_capture', data: { habitId, date } });
     const noteMsg = await bot.sendMessage(chatId, '📝 Add a note? (type it or tap Skip)', {
@@ -648,6 +881,15 @@ bot.on('callback_query', async (q) => {
     if (!habit) return;
     await bot.editMessageText(`Loading *${habit.habit_name}*…`, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown' });
     await sendHabitDetail(chatId, user, habit);
+    return;
+  }
+
+  // cpd:{habitId} — compound effect from picker
+  if (data.startsWith('cpd:')) {
+    const habitId = parseInt(data.split(':')[1]);
+    const habit   = db.getHabit(habitId, user.id);
+    if (!habit) return;
+    await sendCompoundEffect(chatId, user, habit);
     return;
   }
 
@@ -674,6 +916,24 @@ bot.on('callback_query', async (q) => {
       `🎉 *Perfect day!* All ${habits.length}/${habits.length} habits marked done!`,
       { parse_mode: 'Markdown' }
     );
+    return;
+  }
+
+  // freeze_use
+  if (data === 'freeze_use') {
+    const today = getToday(user.timezone);
+    db.useStreakFreeze(user.telegram_id, today);
+    await bot.editMessageText('🧊 Freeze used! Your streak is protected for today. Get back on track tomorrow 💪', {
+      chat_id: chatId, message_id: msgId,
+    });
+    return;
+  }
+
+  // freeze_skip
+  if (data === 'freeze_skip') {
+    await bot.editMessageText('Ok, streak reset. Fresh start tomorrow! 🌱', {
+      chat_id: chatId, message_id: msgId,
+    });
     return;
   }
 

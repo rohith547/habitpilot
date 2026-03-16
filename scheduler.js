@@ -100,6 +100,13 @@ cron.schedule('* * * * *', async () => {
           }
           const coach = coachMessage(user, weekScore, lastWeekScore, bestEver);
           await sendWeeklyReport(user, coach);
+          // Award freeze for 7+ day streak
+          const { currentStreak: calcStreak } = require('./dashboard');
+          const userStreak = db.getStreak(user.id);
+          if (userStreak >= 7) {
+            db.addStreakFreeze(user.id);
+            console.log(`[Scheduler] Awarded freeze to user ${user.id}`);
+          }
         }
       } catch (err) {
         errors.logError('scheduler:weekly', err, user.telegram_id);
@@ -141,5 +148,48 @@ cron.schedule('* * * * *', async () => {
 
 // Clear nudgedToday at midnight UTC
 cron.schedule('0 0 * * *', () => { nudgedToday.clear(); });
+
+// Streak freeze nudge — 23:30 in user's timezone
+const freezeNudged = new Set();
+cron.schedule('* * * * *', async () => {
+  try {
+    const users = db.getAllUsers();
+    for (const user of users) {
+      try {
+        if (db.isUserPaused(user)) continue;
+        const userTime = getUserTime(user.timezone);
+        const userDate = getToday(user.timezone);
+        const nudgeKey = `freeze:${user.id}:${userDate}`;
+        if (userTime === '23:30' && !freezeNudged.has(nudgeKey)) {
+          const noLogs = db.getUsersWithNoLogsToday(userDate);
+          if (noLogs.some(u => u.id === user.id)) {
+            const freezeData = db.getStreakFreezes(user.id);
+            const streak = db.getStreak(user.id);
+            if (streak >= 3 && freezeData && freezeData.streak_freezes > 0) {
+              freezeNudged.add(nudgeKey);
+              const { bot } = require('./telegram');
+              await bot.sendMessage(user.telegram_id,
+                `🧊 *Streak freeze available!* You haven't logged today and your ${streak}-day streak is at risk.\n\nUse a freeze to protect it?`,
+                {
+                  parse_mode: 'Markdown',
+                  reply_markup: {
+                    inline_keyboard: [[
+                      { text: `🧊 Use freeze (${freezeData.streak_freezes} left)`, callback_data: 'freeze_use' },
+                      { text: 'Let it go', callback_data: 'freeze_skip' },
+                    ]],
+                  },
+                }
+              );
+            }
+          }
+        }
+      } catch (err) {
+        errors.logError('scheduler:freeze', err, user.telegram_id);
+      }
+    }
+  } catch (err) {
+    errors.logError('scheduler:freeze:outer', err);
+  }
+});
 
 console.log('[Scheduler] Running — checks every minute.');

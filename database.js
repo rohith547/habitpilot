@@ -67,6 +67,19 @@ function initSchema() {
   `);
   try { db.exec('ALTER TABLE habit_logs ADD COLUMN note TEXT'); } catch(e) {}
   try { db.exec('ALTER TABLE users ADD COLUMN paused_until TEXT DEFAULT NULL'); } catch(e) {}
+  // milestone_log table
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS milestone_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      habit_id INTEGER,
+      milestone INTEGER NOT NULL,
+      celebrated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(user_id, habit_id, milestone)
+    );
+  `);
+  try { db.exec('ALTER TABLE users ADD COLUMN streak_freezes INTEGER DEFAULT 0'); } catch(e) {}
+  try { db.exec('ALTER TABLE users ADD COLUMN freeze_used_date TEXT DEFAULT NULL'); } catch(e) {}
 }
 
 // ── Users ──────────────────────────────────────────────────────────────────
@@ -107,18 +120,22 @@ function getHabit(habitId, userId) {
 }
 
 function getStreak(userId) {
-  // Consecutive days (ending today or yesterday) where user logged at least one 100% habit
   const rows = db.prepare(
     'SELECT DISTINCT date FROM habit_logs WHERE user_id = ? AND completion_value = 100 ORDER BY date DESC'
   ).all(userId);
-  if (!rows.length) return 0;
+  const userRow = db.prepare('SELECT freeze_used_date FROM users WHERE id = ?').get(userId);
+  const freezeDate = userRow ? userRow.freeze_used_date : null;
+  if (!rows.length && !freezeDate) return 0;
+  const loggedDates = new Set(rows.map(r => r.date));
+  if (freezeDate) loggedDates.add(freezeDate);
+  const allDates = [...loggedDates].sort().reverse();
   let streak = 0;
   const today = new Date(); today.setHours(0, 0, 0, 0);
-  for (const row of rows) {
-    const d    = new Date(row.date + 'T00:00:00');
+  for (const date of allDates) {
+    const d    = new Date(date + 'T00:00:00');
     const diff = Math.round((today - d) / 86400000);
     if (diff === streak) streak++;
-    else if (diff === streak + 1 && streak === 0) { streak++; } // allow yesterday start
+    else if (diff === streak + 1 && streak === 0) { streak++; }
     else break;
   }
   return streak;
@@ -383,6 +400,67 @@ function seedHabitPack(userId, packName) {
   }
 }
 
+// ── Milestone celebrations ──────────────────────────────────────────────────
+function checkAndCelebrateMilestone(userId, habitId, streak) {
+  const thresholds = [3, 7, 14, 21, 30, 50, 66, 100];
+  const milestone = thresholds.filter(t => t <= streak).pop();
+  if (!milestone) return null;
+  const existing = db.prepare(
+    'SELECT id FROM milestone_log WHERE user_id = ? AND habit_id IS ? AND milestone = ?'
+  ).get(userId, habitId, milestone);
+  if (existing) return null;
+  try {
+    db.prepare(
+      'INSERT INTO milestone_log (user_id, habit_id, milestone) VALUES (?, ?, ?)'
+    ).run(userId, habitId, milestone);
+    return milestone;
+  } catch(e) {
+    return null;
+  }
+}
+
+// ── Streak freezes ──────────────────────────────────────────────────────────
+function getStreakFreezes(userId) {
+  return db.prepare('SELECT streak_freezes, freeze_used_date FROM users WHERE id = ?').get(userId);
+}
+
+function addStreakFreeze(userId, count = 1) {
+  db.prepare('UPDATE users SET streak_freezes = MIN(streak_freezes + ?, 3) WHERE id = ?').run(count, userId);
+}
+
+function useStreakFreeze(telegramId, date) {
+  db.prepare('UPDATE users SET streak_freezes = streak_freezes - 1, freeze_used_date = ? WHERE telegram_id = ? AND streak_freezes > 0').run(date, String(telegramId));
+}
+
+// ── Habit correlation engine ────────────────────────────────────────────────
+function getCorrelations(userId) {
+  const habits = getHabits(userId);
+  if (habits.length < 2) return [];
+  const startDate = new Date(Date.now() - 60*86400000).toISOString().split('T')[0];
+  const endDate = new Date().toISOString().split('T')[0];
+  const logs = getRangeLogs(userId, startDate, endDate);
+  const allDates = [...new Set(logs.map(l => l.date))];
+  if (allDates.length < 10) return [];
+  const results = [];
+  for (const habitA of habits) {
+    const daysA = allDates.filter(d => logs.find(l => l.habit_id === habitA.id && l.date === d && l.completion_value > 0));
+    if (daysA.length < 5) continue;
+    for (const habitB of habits) {
+      if (habitA.id === habitB.id) continue;
+      const daysB = allDates.filter(d => logs.find(l => l.habit_id === habitB.id && l.date === d && l.completion_value > 0));
+      const baseline = Math.round(daysB.length / allDates.length * 100);
+      const coOccur = daysA.filter(d => logs.find(l => l.habit_id === habitB.id && l.date === d && l.completion_value > 0));
+      if (coOccur.length < 3) continue;
+      const correlation = Math.round(coOccur.length / daysA.length * 100);
+      const lift = correlation - baseline;
+      if (lift >= 15) {
+        results.push({ habitA: habitA.habit_name, habitB: habitB.habit_name, correlation, baseline, lift });
+      }
+    }
+  }
+  return results.sort((a, b) => b.lift - a.lift).slice(0, 5);
+}
+
 module.exports = {
   getDb,
   getOrCreateUser, getUser, updateUserTimezone, getAllUsers, getActiveUsers,
@@ -395,4 +473,7 @@ module.exports = {
   updateLogNote, updateHabitOrder, getHabitStats, getUsersWithNoLogsToday,
   pauseUser, isUserPaused,
   HABIT_PACKS, seedHabitPack,
+  checkAndCelebrateMilestone,
+  getStreakFreezes, addStreakFreeze, useStreakFreeze,
+  getCorrelations,
 };

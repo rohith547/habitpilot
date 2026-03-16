@@ -467,3 +467,109 @@ describe('pauseUser / isUserPaused', () => {
     expect(afterExpiry.paused_until).toBeNull()
   })
 })
+
+// ── checkAndCelebrateMilestone ───────────────────────────────────────────────
+describe('checkAndCelebrateMilestone', () => {
+  let user
+
+  beforeEach(() => {
+    user = makeUser(String(Date.now() + Math.random()))
+  })
+
+  it('returns milestone number on first call when streak crosses threshold', () => {
+    const result = db.checkAndCelebrateMilestone(user.id, null, 7)
+    expect(result).toBe(7)
+  })
+
+  it('returns null on second call for same milestone (dedup)', () => {
+    db.checkAndCelebrateMilestone(user.id, null, 7)
+    const result = db.checkAndCelebrateMilestone(user.id, null, 7)
+    expect(result).toBeNull()
+  })
+
+  it('returns highest threshold <= streak', () => {
+    const result = db.checkAndCelebrateMilestone(user.id, null, 10)
+    expect(result).toBe(7) // highest threshold <= 10 is 7
+  })
+
+  it('returns null if streak below minimum threshold', () => {
+    const result = db.checkAndCelebrateMilestone(user.id, null, 2)
+    expect(result).toBeNull()
+  })
+
+  it('tracks per-habit milestones separately from overall', () => {
+    const resultOverall = db.checkAndCelebrateMilestone(user.id, null, 7)
+    const resultHabit   = db.checkAndCelebrateMilestone(user.id, 42, 7)
+    expect(resultOverall).toBe(7)
+    expect(resultHabit).toBe(7)
+  })
+})
+
+// ── getStreakFreezes ──────────────────────────────────────────────────────────
+describe('getStreakFreezes', () => {
+  let user
+
+  beforeEach(() => {
+    user = makeUser(String(Date.now() + Math.random()))
+  })
+
+  it('returns 0 freezes for new user', () => {
+    const data = db.getStreakFreezes(user.id)
+    expect(data.streak_freezes).toBe(0)
+  })
+
+  it('returns correct freeze count after adding', () => {
+    db.addStreakFreeze(user.id, 2)
+    const data = db.getStreakFreezes(user.id)
+    expect(data.streak_freezes).toBe(2)
+  })
+})
+
+// ── addStreakFreeze ───────────────────────────────────────────────────────────
+describe('addStreakFreeze', () => {
+  let user
+
+  beforeEach(() => {
+    user = makeUser(String(Date.now() + Math.random()))
+  })
+
+  it('increments freeze count', () => {
+    db.addStreakFreeze(user.id, 1)
+    const data = db.getStreakFreezes(user.id)
+    expect(data.streak_freezes).toBe(1)
+  })
+
+  it('caps at 3', () => {
+    db.addStreakFreeze(user.id, 5)
+    const data = db.getStreakFreezes(user.id)
+    expect(data.streak_freezes).toBe(3)
+  })
+
+  it('adding to 2 and then 2 more still caps at 3', () => {
+    db.addStreakFreeze(user.id, 2)
+    db.addStreakFreeze(user.id, 2)
+    const data = db.getStreakFreezes(user.id)
+    expect(data.streak_freezes).toBe(3)
+  })
+})
+
+// ── getCorrelations ───────────────────────────────────────────────────────────
+describe('getCorrelations', () => {
+  let user
+
+  beforeEach(() => {
+    user = makeUser(String(Date.now() + Math.random()))
+  })
+
+  it('returns empty array with fewer than 2 habits', () => {
+    const result = db.getCorrelations(user.id)
+    expect(result).toEqual([])
+  })
+
+  it('returns empty array with less than 10 days of data', () => {
+    db.addHabit(user.id, 'Habit A', 'exercise', null, 1, 1)
+    db.addHabit(user.id, 'Habit B', 'exercise', null, 1, 1)
+    const result = db.getCorrelations(user.id)
+    expect(result).toEqual([])
+  })
+})
