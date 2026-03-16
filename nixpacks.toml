@@ -1,0 +1,12 @@
+# nixpacks config — ensures better-sqlite3 compiles correctly on Railway
+[phases.setup]
+nixPkgs = ["nodejs_20", "python3", "gcc", "gnumake"]
+
+[phases.install]
+cmds = ["npm ci --include=dev"]
+
+[phases.build]
+cmds = ["npm rebuild better-sqlite3"]
+
+[start]
+cmd = "node index.js"

@@ -3,10 +3,14 @@
   "version": "1.0.0",
   "description": "Minimalist Telegram habit tracking bot",
   "main": "index.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
   "scripts": {
     "start": "node index.js",
     "dev": "node index.js",
-    "test": "jest tests/ --forceExit"
+    "test": "jest tests/ --forceExit",
+    "postinstall": "npm rebuild better-sqlite3"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.3",
