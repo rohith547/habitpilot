@@ -87,7 +87,21 @@ bot.onText(/\/start/, async (msg) => {
 // ── /help ──────────────────────────────────────────────────────────────────
 bot.onText(/\/help/, async (msg) => {
   await bot.sendMessage(msg.chat.id,
-    `/log — check in now\n/status — today's progress\n/dashboard — weekly & monthly metrics\n/addhabit — add a habit\n/edithabit — edit name, target, or check-in slot\n/removehabit — remove a habit\n/config — notification times & timezone\n/start — register / reset`
+    `*Check-in*\n` +
+    `/log — check in now (log all habits)\n` +
+    `/status — today's progress + trend vs avg\n` +
+    `\n*Insights*\n` +
+    `/dashboard — weekly & monthly metrics\n` +
+    `/habit <name> — heatmap, streak & stats for one habit\n` +
+    `  e.g. /habit pushups\n` +
+    `\n*Manage habits*\n` +
+    `/addhabit — add a habit\n` +
+    `/edithabit — edit name, target, order, or check-in slot\n` +
+    `/removehabit — remove a habit\n` +
+    `\n*Settings*\n` +
+    `/config — reminder times & timezone\n` +
+    `/start — register / reset`,
+    { parse_mode: 'Markdown' }
   );
 });
 
