@@ -32,13 +32,16 @@ function extractNumber(str) {
 // ── Keyboard builder ───────────────────────────────────────────────────────
 
 function buildLogKeyboard(habitId, date, currentVal = -1) {
-  const mark = (v) => currentVal === v ? '·' : '';
+  const btn = (label, v) => ({
+    text: currentVal === v ? `● ${label}` : label,
+    callback_data: `log:${habitId}:${v}:${date}`,
+  });
   return {
     inline_keyboard: [[
-      { text: `${mark(0)}✗`,    callback_data: `log:${habitId}:0:${date}` },
-      { text: `${mark(25)}25%`, callback_data: `log:${habitId}:25:${date}` },
-      { text: `${mark(50)}50%`, callback_data: `log:${habitId}:50:${date}` },
-      { text: `${mark(100)}✓`,  callback_data: `log:${habitId}:100:${date}` },
+      btn('✗ Skip', 0),
+      btn('25%',    25),
+      btn('50%',    50),
+      btn('✓ Done', 100),
     ]],
   };
 }

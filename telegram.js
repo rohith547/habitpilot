@@ -214,10 +214,53 @@ bot.on('callback_query', async (q) => {
     const habitId = parseInt(parts[1]);
     const value   = parseInt(parts[2]);
     const date    = parts[3];
+
+    // Block past-date logging
+    const today = getToday(user.timezone);
+    if (date < today) {
+      await bot.answerCallbackQuery(qId, { text: "⛔ Can't log past dates.", show_alert: true });
+      return;
+    }
+
     db.logHabit(user.id, habitId, date, value);
-    await bot.editMessageReplyMarkup(buildLogKeyboard(habitId, date, value), {
-      chat_id: chatId, message_id: msgId,
-    });
+
+    // Update BOTH the text line (green ✅ / emoji) AND the keyboard
+    const habit = db.getHabit(habitId, user.id);
+    if (habit) {
+      await bot.editMessageText(habitLine(habit, { completion_value: value }), {
+        chat_id: chatId, message_id: msgId,
+        parse_mode: 'Markdown',
+        reply_markup: buildLogKeyboard(habitId, date, value),
+      });
+    } else {
+      await bot.editMessageReplyMarkup(buildLogKeyboard(habitId, date, value), {
+        chat_id: chatId, message_id: msgId,
+      });
+    }
+
+    // Progress feedback — show when all habits have been logged for today
+    const allHabits = db.getHabits(user.id);
+    const allLogs   = db.getTodayLogs(user.id, date);
+    if (allLogs.length >= allHabits.length) {
+      const done100  = allLogs.filter(l => l.completion_value === 100).length;
+      const score    = Math.round(
+        allLogs.reduce((s, l) => s + l.completion_value, 0) / (allHabits.length * 100) * 100
+      );
+      const streak   = db.getStreak(user.id);
+      const streakTxt = streak > 1 ? `\n🔥 ${streak}-day streak!` : '';
+
+      if (done100 === allHabits.length) {
+        await bot.sendMessage(chatId,
+          `🎉 *Perfect day!* All ${done100}/${allHabits.length} habits done — *100%*${streakTxt}`,
+          { parse_mode: 'Markdown' }
+        );
+      } else {
+        await bot.sendMessage(chatId,
+          `✅ All logged — *${score}%* today (${done100}/${allHabits.length} fully done)${streakTxt}`,
+          { parse_mode: 'Markdown' }
+        );
+      }
+    }
     return;
   }
 

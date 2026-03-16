@@ -98,6 +98,28 @@ function getActiveUsers(days = 7) {
 }
 
 // ── Habits ─────────────────────────────────────────────────────────────────
+function getHabit(habitId, userId) {
+  return db.prepare('SELECT * FROM habits WHERE id = ? AND user_id = ? AND active = 1').get(habitId, userId);
+}
+
+function getStreak(userId) {
+  // Consecutive days (ending today or yesterday) where user logged at least one 100% habit
+  const rows = db.prepare(
+    'SELECT DISTINCT date FROM habit_logs WHERE user_id = ? AND completion_value = 100 ORDER BY date DESC'
+  ).all(userId);
+  if (!rows.length) return 0;
+  let streak = 0;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  for (const row of rows) {
+    const d    = new Date(row.date + 'T00:00:00');
+    const diff = Math.round((today - d) / 86400000);
+    if (diff === streak) streak++;
+    else if (diff === streak + 1 && streak === 0) { streak++; } // allow yesterday start
+    else break;
+  }
+  return streak;
+}
+
 function getHabits(userId, activeOnly = true) {
   const q = activeOnly
     ? 'SELECT * FROM habits WHERE user_id = ? AND active = 1 ORDER BY sort_order, id'
@@ -208,7 +230,8 @@ function getRangeLogs(userId, startDate, endDate) {
 module.exports = {
   getDb,
   getOrCreateUser, getUser, updateUserTimezone, getAllUsers, getActiveUsers,
-  getHabits, addHabit, removeHabit, updateHabit, seedDefaultHabits,
+  getHabit, getHabits, addHabit, removeHabit, updateHabit, seedDefaultHabits,
   getNotifications, setDefaultNotifications, updateNotification, markNotificationSent,
   logHabit, getLog, getTodayLogs, getRangeLogs,
+  getStreak,
 };
