@@ -13,6 +13,20 @@ const {
 
 const bot = new TelegramBot(config.BOT_TOKEN, { polling: true });
 
+// Register commands with Telegram — shows in the "/" menu for all users
+bot.setMyCommands([
+  { command: 'log',         description: '✏️ Check in — log today\'s habits' },
+  { command: 'status',      description: '📋 Today\'s progress + trend vs avg' },
+  { command: 'dashboard',   description: '📊 Weekly & monthly metrics' },
+  { command: 'habit',       description: '🔍 Heatmap & stats for one habit (e.g. /habit pushups)' },
+  { command: 'addhabit',    description: '➕ Add a new habit' },
+  { command: 'edithabit',   description: '✏️ Edit name, target, reminder, or order' },
+  { command: 'removehabit', description: '🗑 Remove a habit' },
+  { command: 'config',      description: '⚙️ Reminder times & timezone' },
+  { command: 'help',        description: '❓ Show all commands' },
+  { command: 'start',       description: '🚀 Register / reset' },
+]).catch(err => console.error('[Bot] setMyCommands failed:', err.message));
+
 // In-memory conversation state: telegramId → { step, data }
 const state = new Map();
 
