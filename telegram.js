@@ -197,37 +197,87 @@ bot.onText(/\/dashboard/, async (msg) => {
   await bot.sendMessage(chatId, dashboard.generateReport(user), { parse_mode: 'Markdown' });
 });
 
-// ── /habit <name> ──────────────────────────────────────────────────────────
-bot.onText(/\/habit\s+(.+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const user   = requireUser(chatId, msg.from.id);
-  if (!user) return;
+// ── /habit helpers ─────────────────────────────────────────────────────────
+function fuzzyMatch(query, name) {
+  const q = query.toLowerCase().replace(/\s+/g, '');
+  const n = name.toLowerCase().replace(/\s+/g, '');
+  // exact contains
+  if (n.includes(q)) return true;
+  // every char of query appears in order in name (handles typos like "pusups" → "pushups")
+  let qi = 0;
+  for (let i = 0; i < n.length && qi < q.length; i++) {
+    if (n[i] === q[qi]) qi++;
+  }
+  if (qi === q.length) return true;
+  // allow 1 wrong character (simple edit distance ≤ 1)
+  let mismatches = 0;
+  const minLen = Math.min(q.length, n.length);
+  for (let i = 0; i < minLen; i++) if (q[i] !== n[i]) mismatches++;
+  mismatches += Math.abs(q.length - n.length);
+  return mismatches <= 1;
+}
 
-  const query = match[1].trim().toLowerCase();
-  const habits = db.getHabits(user.id);
-  const habit  = habits.find(h => h.habit_name.toLowerCase().includes(query));
-  if (!habit) return bot.sendMessage(chatId, `❌ No habit found matching "${match[1].trim()}"`);
-
+async function sendHabitDetail(chatId, user, habit) {
   const streak  = db.getHabitStreak(user.id, habit.id);
   const best    = db.getHabitPersonalBest(user.id, habit.id);
   const stats   = db.getHabitStats(user.id, habit.id, 30);
   const calLogs = db.getHabitCalendar(user.id, habit.id, 28);
   const heatmap = buildHeatmap(calLogs, 28);
-
   const emoji   = categoryEmoji(habit.category);
   const target  = habit.target_value ? ` — ${habit.target_value}` : '';
   const donePct = Math.round(stats.done100 / 30 * 100);
-
-  const lines = [
+  await bot.sendMessage(chatId, [
     `${emoji} *${habit.habit_name}*${target}`,
     `🔥 Streak: ${streak} days | 🏆 Best: ${best} days`,
     `📊 30 days: ${donePct}% done | ${stats.consistency}% consistency`,
     ``,
     `*Last 28 days:*`,
     heatmap,
-  ];
+  ].join('\n'), { parse_mode: 'Markdown' });
+}
 
-  await bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown' });
+// /habit — no argument → show picker
+bot.onText(/^\/habit$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const user   = requireUser(chatId, msg.from.id);
+  if (!user) return;
+  const habits = db.getHabits(user.id);
+  if (!habits.length) return bot.sendMessage(chatId, 'No habits. Use /addhabit.');
+  await bot.sendMessage(chatId, 'Which habit?', {
+    reply_markup: {
+      inline_keyboard: habits.map(h => [{
+        text: `${categoryEmoji(h.category)} ${h.habit_name}`,
+        callback_data: `hd:${h.id}`,
+      }]),
+    },
+  });
+});
+
+// /habit <name> — fuzzy search
+bot.onText(/\/habit\s+(.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const user   = requireUser(chatId, msg.from.id);
+  if (!user) return;
+
+  const query  = match[1].trim();
+  const habits = db.getHabits(user.id);
+  const habit  = habits.find(h => fuzzyMatch(query, h.habit_name));
+
+  if (!habit) {
+    // Show picker if no match found
+    await bot.sendMessage(chatId, `❓ No habit matched *"${query}"*. Pick one:`, {
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: habits.map(h => [{
+          text: `${categoryEmoji(h.category)} ${h.habit_name}`,
+          callback_data: `hd:${h.id}`,
+        }]),
+      },
+    });
+    return;
+  }
+
+  await sendHabitDetail(chatId, user, habit);
 });
 
 // ── /addhabit ──────────────────────────────────────────────────────────────
@@ -393,6 +443,16 @@ bot.on('callback_query', async (q) => {
       bot.deleteMessage(chatId, noteMsgId).catch(() => {});
     }, 120000);
 
+    return;
+  }
+
+  // hd:{habitId} — habit detail from picker
+  if (data.startsWith('hd:')) {
+    const habitId = parseInt(data.split(':')[1]);
+    const habit   = db.getHabit(habitId, user.id);
+    if (!habit) return;
+    await bot.editMessageText(`Loading *${habit.habit_name}*…`, { chat_id: chatId, message_id: msgId, parse_mode: 'Markdown' });
+    await sendHabitDetail(chatId, user, habit);
     return;
   }
 
