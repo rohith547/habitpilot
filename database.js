@@ -7,8 +7,8 @@ let db;
 
 function getDb() {
   if (db) return db;
-  const isEphemeral = !config.DB_PATH.startsWith('/data');
-  if (isEphemeral) console.warn('[DB] ⚠️  Running on ephemeral storage. Add Railway Volume mounted at /data and set DB_PATH=/data/habits.db');
+  const isEphemeral = !config.DB_PATH.startsWith('/app/data') && !config.DB_PATH.startsWith('/data');
+  if (isEphemeral) console.warn('[DB] ⚠️  Running on ephemeral storage. Data will be lost on redeploy!\n    Fix: Right-click Railway canvas → Add Volume → mount at /app/data → set DB_PATH=/app/data/habits.db');
   const dir = path.dirname(config.DB_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   db = new Database(config.DB_PATH);
