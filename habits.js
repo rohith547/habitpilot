@@ -33,7 +33,7 @@ function extractNumber(str) {
 
 function buildLogKeyboard(habitId, date, currentVal = -1) {
   const btn = (label, v) => ({
-    text: currentVal === v ? `● ${label}` : label,
+    text: currentVal === v ? `✅ ${label}` : label,
     callback_data: `log:${habitId}:${v}:${date}`,
   });
   return {
