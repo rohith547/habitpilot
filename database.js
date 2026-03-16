@@ -182,10 +182,24 @@ function setDefaultNotifications(userId) {
   db.prepare('INSERT INTO notifications (user_id, notification_time, notification_type) VALUES (?, ?, ?)').run(userId, '21:30', 'night');
 }
 
+function addNotification(userId, label, time) {
+  db.prepare(
+    'INSERT INTO notifications (user_id, notification_time, notification_type) VALUES (?, ?, ?)'
+  ).run(userId, time, label.toLowerCase().slice(0, 30));
+}
+
+function removeNotification(notifId, userId) {
+  db.prepare('DELETE FROM notifications WHERE id = ? AND user_id = ?').run(notifId, userId);
+}
+
 function updateNotification(userId, type, time) {
   db.prepare(
     'UPDATE notifications SET notification_time = ? WHERE user_id = ? AND notification_type = ?'
   ).run(time, userId, type);
+}
+
+function updateNotificationById(notifId, userId, time) {
+  db.prepare('UPDATE notifications SET notification_time = ? WHERE id = ? AND user_id = ?').run(time, notifId, userId);
 }
 
 function markNotificationSent(notifId, date) {
@@ -231,7 +245,8 @@ module.exports = {
   getDb,
   getOrCreateUser, getUser, updateUserTimezone, getAllUsers, getActiveUsers,
   getHabit, getHabits, addHabit, removeHabit, updateHabit, seedDefaultHabits,
-  getNotifications, setDefaultNotifications, updateNotification, markNotificationSent,
+  getNotifications, setDefaultNotifications, updateNotification, updateNotificationById,
+  addNotification, removeNotification, markNotificationSent,
   logHabit, getLog, getTodayLogs, getRangeLogs,
   getStreak,
 };

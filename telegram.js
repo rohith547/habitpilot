@@ -24,7 +24,32 @@ function habitLine(habit, log) {
   return `${categoryEmoji(habit.category)} *${habit.habit_name}*${target} ${status}`;
 }
 
-// ── /start ─────────────────────────────────────────────────────────────────
+// ── Config helpers ─────────────────────────────────────────────────────────
+const REMINDER_EMOJI = { morning: '🌅', afternoon: '☀️', evening: '🌆', night: '🌙', lunch: '🍽️', default: '🔔' };
+
+function reminderEmoji(type) {
+  return REMINDER_EMOJI[type] || REMINDER_EMOJI.default;
+}
+
+async function sendConfigMenu(chatId, userId) {
+  const notifs = db.getNotifications(userId);
+  const user   = db.getAllUsers().find(u => u.id === userId);
+  const rows   = notifs.map(n => [{
+    text: `${reminderEmoji(n.notification_type)} ${n.notification_time} — ${n.notification_type}`,
+    callback_data: `nef:${n.id}`,
+  }, {
+    text: '🗑 Remove',
+    callback_data: `nrm:${n.id}`,
+  }]);
+  rows.push([{ text: '➕ Add reminder', callback_data: 'nadd' }]);
+  rows.push([{ text: '🌍 Timezone',     callback_data: 'cfg:tz' }]);
+  await bot.sendMessage(chatId,
+    `*Config*\n\nTimezone: ${user?.timezone || 'America/Chicago'}\n\n*Reminders (tap to edit time):*`,
+    { parse_mode: 'Markdown', reply_markup: { inline_keyboard: rows } }
+  );
+}
+
+
 bot.onText(/\/start/, async (msg) => {
   const { id: telegramId, username, first_name } = msg.from;
   const chatId = msg.chat.id;
@@ -157,24 +182,7 @@ bot.onText(/\/config/, async (msg) => {
   const chatId = msg.chat.id;
   const user   = requireUser(chatId, msg.from.id);
   if (!user) return;
-
-  const notifs  = db.getNotifications(user.id);
-  const morning = notifs.find(n => n.notification_type === 'morning')?.notification_time || '07:30';
-  const night   = notifs.find(n => n.notification_type === 'night')?.notification_time   || '21:30';
-
-  await bot.sendMessage(chatId,
-    `*Config*\n\nTimezone: ${user.timezone}\nMorning: ${morning}\nNight: ${night}`,
-    {
-      parse_mode: 'Markdown',
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🌅 Morning time', callback_data: 'cfg:morning' }],
-          [{ text: '🌙 Night time',   callback_data: 'cfg:night'   }],
-          [{ text: '🌍 Timezone',     callback_data: 'cfg:tz'      }],
-        ],
-      },
-    }
-  );
+  await sendConfigMenu(chatId, user.id);
 });
 
 // ── /admin ─────────────────────────────────────────────────────────────────
@@ -286,6 +294,36 @@ bot.on('callback_query', async (q) => {
     await bot.sendMessage(chatId, 'Timezone? (e.g. America/New_York, Europe/London, Asia/Kolkata)', {
       reply_markup: { force_reply: true },
     });
+    return;
+  }
+
+  // ── Flexible reminders ──────────────────────────────────────────────────
+  // nadd — start add-reminder flow
+  if (data === 'nadd') {
+    state.set(String(telegramId), { step: 'notif_label', data: {} });
+    await bot.sendMessage(chatId,
+      'Label for this reminder?\n(e.g. Morning, Afternoon, Lunch, Evening)',
+      { reply_markup: { force_reply: true } }
+    );
+    return;
+  }
+
+  // nef:{id} — edit reminder time
+  if (data.startsWith('nef:')) {
+    const notifId = parseInt(data.split(':')[1]);
+    state.set(String(telegramId), { step: 'notif_edit_time', data: { notifId } });
+    await bot.sendMessage(chatId, 'New time for this reminder? (HH:MM, 24h — e.g. 13:00)', {
+      reply_markup: { force_reply: true },
+    });
+    return;
+  }
+
+  // nrm:{id} — remove reminder
+  if (data.startsWith('nrm:')) {
+    const notifId = parseInt(data.split(':')[1]);
+    db.removeNotification(notifId, user.id);
+    await bot.editMessageText('🗑 Reminder removed.', { chat_id: chatId, message_id: msgId });
+    await sendConfigMenu(chatId, user.id);
     return;
   }
 
@@ -449,8 +487,55 @@ bot.on('message', async (msg) => {
     }
 
 
+    case 'notif_label': {
+      s.data.label = text.slice(0, 30);
+      s.step = 'notif_time';
+      state.set(String(telegramId), s);
+      await bot.sendMessage(chatId,
+        `Time for *${s.data.label}* reminder? (HH:MM, 24h — e.g. 13:00)`,
+        { parse_mode: 'Markdown', reply_markup: { force_reply: true } }
+      );
+      break;
+    }
+
+    case 'notif_time': {
+      if (/^\d{1,2}:\d{2}$/.test(text)) {
+        const [h, m] = text.split(':').map(Number);
+        if (h >= 0 && h < 24 && m >= 0 && m < 60) {
+          const formatted = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+          db.addNotification(user.id, s.data.label, formatted);
+          state.delete(String(telegramId));
+          await bot.sendMessage(chatId,
+            `✅ *${s.data.label}* reminder added at ${formatted}.`,
+            { parse_mode: 'Markdown' }
+          );
+          await sendConfigMenu(chatId, user.id);
+          return;
+        }
+      }
+      await bot.sendMessage(chatId, 'Use HH:MM format (e.g. 13:00).');
+      break;
+    }
+
+    case 'notif_edit_time': {
+      if (/^\d{1,2}:\d{2}$/.test(text)) {
+        const [h, m] = text.split(':').map(Number);
+        if (h >= 0 && h < 24 && m >= 0 && m < 60) {
+          const formatted = `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+          db.updateNotificationById(s.data.notifId, user.id, formatted);
+          state.delete(String(telegramId));
+          await bot.sendMessage(chatId, `✅ Reminder updated to ${formatted}.`);
+          await sendConfigMenu(chatId, user.id);
+          return;
+        }
+      }
+      await bot.sendMessage(chatId, 'Use HH:MM format (e.g. 13:00).');
+      break;
+    }
+
     case 'cfg_morning':
     case 'cfg_night': {
+      // Legacy: kept for backward compat if state was set before upgrade
       const type = s.step === 'cfg_morning' ? 'morning' : 'night';
       if (/^\d{1,2}:\d{2}$/.test(text)) {
         const [h, m] = text.split(':').map(Number);
@@ -500,11 +585,11 @@ bot.on('polling_error', (err) => {
 // ── Check-in sender (called by scheduler) ─────────────────────────────────
 async function sendCheckin(user, type) {
   const date   = getToday(user.timezone);
-  const habits = db.getHabits(user.id).filter(h => type === 'morning' ? h.notify_morning : h.notify_night);
+  const habits = db.getHabits(user.id); // all active habits for any reminder type
   if (!habits.length) return;
 
-  const title = type === 'morning' ? 'Morning check-in.' : 'Daily review.';
-  await bot.sendMessage(user.telegram_id, title);
+  const typeLabel = type.charAt(0).toUpperCase() + type.slice(1);
+  await bot.sendMessage(user.telegram_id, `${reminderEmoji(type)} *${typeLabel} check-in*`, { parse_mode: 'Markdown' });
 
   for (const habit of habits) {
     const log = db.getLog(user.id, habit.id, date);
