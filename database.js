@@ -63,6 +63,7 @@ function initSchema() {
       FOREIGN KEY (user_id) REFERENCES users(id)
     );
   `);
+  try { db.exec('ALTER TABLE habit_logs ADD COLUMN note TEXT'); } catch(e) {}
 }
 
 // ── Users ──────────────────────────────────────────────────────────────────
@@ -241,6 +242,88 @@ function getRangeLogs(userId, startDate, endDate) {
   `).all(userId, startDate, endDate);
 }
 
+// ── Habit-specific streak ──────────────────────────────────────────────────
+function getHabitStreak(userId, habitId) {
+  const rows = db.prepare(
+    'SELECT date FROM habit_logs WHERE user_id = ? AND habit_id = ? AND completion_value > 0 ORDER BY date DESC'
+  ).all(userId, habitId);
+  if (!rows.length) return 0;
+  let streak = 0;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  for (const row of rows) {
+    const d = new Date(row.date + 'T00:00:00');
+    const diff = Math.round((today - d) / 86400000);
+    if (diff === streak) streak++;
+    else if (diff === streak + 1 && streak === 0) { streak++; }
+    else break;
+  }
+  return streak;
+}
+
+// ── All-time personal best streak for a specific habit ─────────────────────
+function getHabitPersonalBest(userId, habitId) {
+  const rows = db.prepare(
+    'SELECT date FROM habit_logs WHERE user_id = ? AND habit_id = ? AND completion_value > 0 ORDER BY date ASC'
+  ).all(userId, habitId);
+  if (!rows.length) return 0;
+  let best = 1, current = 1;
+  for (let i = 1; i < rows.length; i++) {
+    const prev = new Date(rows[i-1].date + 'T00:00:00');
+    const curr = new Date(rows[i].date + 'T00:00:00');
+    const diff = Math.round((curr - prev) / 86400000);
+    if (diff === 1) { current++; best = Math.max(best, current); }
+    else { current = 1; }
+  }
+  return best;
+}
+
+// ── Last N days of logs for a specific habit (for heatmap) ─────────────────
+function getHabitCalendar(userId, habitId, days = 30) {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - (days - 1));
+  const endStr = end.toISOString().slice(0, 10);
+  const startStr = start.toISOString().slice(0, 10);
+  return db.prepare(
+    'SELECT date, completion_value FROM habit_logs WHERE user_id = ? AND habit_id = ? AND date >= ? AND date <= ? ORDER BY date'
+  ).all(userId, habitId, startStr, endStr);
+}
+
+// ── Add/update a text note on an existing log ──────────────────────────────
+function updateLogNote(userId, habitId, date, note) {
+  db.prepare('UPDATE habit_logs SET note = ? WHERE user_id = ? AND habit_id = ? AND date = ?').run(note, userId, habitId, date);
+}
+
+// ── Update sort_order for reordering ──────────────────────────────────────
+function updateHabitOrder(habitId, userId, sortOrder) {
+  db.prepare('UPDATE habits SET sort_order = ? WHERE id = ? AND user_id = ?').run(sortOrder, habitId, userId);
+}
+
+// ── Stats for a specific habit over N days ─────────────────────────────────
+function getHabitStats(userId, habitId, days = 30) {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - (days - 1));
+  const endStr = end.toISOString().slice(0, 10);
+  const startStr = start.toISOString().slice(0, 10);
+  const logs = db.prepare(
+    'SELECT date, completion_value FROM habit_logs WHERE user_id = ? AND habit_id = ? AND date >= ? AND date <= ?'
+  ).all(userId, habitId, startStr, endStr);
+  const logged = logs.length;
+  const done100 = logs.filter(l => l.completion_value === 100).length;
+  const total = logs.reduce((s, l) => s + l.completion_value, 0);
+  const avgCompletion = logged ? Math.round(total / logged) : 0;
+  const consistency = Math.round(logged / days * 100);
+  return { logged, done100, avgCompletion, consistency, total };
+}
+
+// ── Users who have ZERO logs today ────────────────────────────────────────
+function getUsersWithNoLogsToday(dateStr) {
+  return db.prepare(
+    'SELECT DISTINCT users.* FROM users WHERE id NOT IN (SELECT DISTINCT user_id FROM habit_logs WHERE date = ?)'
+  ).all(dateStr);
+}
+
 module.exports = {
   getDb,
   getOrCreateUser, getUser, updateUserTimezone, getAllUsers, getActiveUsers,
@@ -249,4 +332,6 @@ module.exports = {
   addNotification, removeNotification, markNotificationSent,
   logHabit, getLog, getTodayLogs, getRangeLogs,
   getStreak,
+  getHabitStreak, getHabitPersonalBest, getHabitCalendar,
+  updateLogNote, updateHabitOrder, getHabitStats, getUsersWithNoLogsToday,
 };

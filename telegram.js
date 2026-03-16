@@ -4,12 +4,28 @@ const db        = require('./database');
 const dashboard = require('./dashboard');
 const {
   getToday, completionLabel, categoryEmoji, buildLogKeyboard,
+  buildAllDoneKeyboard, buildHeatmap,
 } = require('./habits');
+const {
+  getHabitStreak, getHabitPersonalBest, getHabitStats, getHabitCalendar,
+  updateLogNote, updateHabitOrder,
+} = require('./database');
 
 const bot = new TelegramBot(config.BOT_TOKEN, { polling: true });
 
 // In-memory conversation state: telegramId → { step, data }
 const state = new Map();
+
+// ── Date range helper ──────────────────────────────────────────────────────
+function getRangeDates(days, timezone) {
+  const dates = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date();
+    d.setDate(d.getDate() - i);
+    dates.push(new Intl.DateTimeFormat('en-CA', { timeZone: timezone }).format(d));
+  }
+  return dates;
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function requireUser(chatId, telegramId) {
@@ -85,7 +101,11 @@ bot.onText(/\/log/, async (msg) => {
   const habits = db.getHabits(user.id);
   if (!habits.length) return bot.sendMessage(chatId, 'No habits. Use /addhabit.');
 
-  await bot.sendMessage(chatId, `*${date}*`, { parse_mode: 'Markdown' });
+  // "Mark all done" button at top
+  await bot.sendMessage(chatId, `*${date}*`, {
+    parse_mode: 'Markdown',
+    reply_markup: buildAllDoneKeyboard(date),
+  });
 
   for (const habit of habits) {
     const log = db.getLog(user.id, habit.id, date);
@@ -109,15 +129,35 @@ bot.onText(/\/status/, async (msg) => {
 
   if (!habits.length) return bot.sendMessage(chatId, 'No habits. Use /addhabit.');
 
-  const lines = habits.map(h => habitLine(h, logMap[h.id] || null));
+  // Per-habit lines with streak
+  const lines = habits.map(h => {
+    const log = logMap[h.id] || null;
+    const status = log ? completionLabel(log.completion_value) : '⬜';
+    const target = h.target_value ? ` — ${h.target_value}` : '';
+    const streak = db.getHabitStreak(user.id, h.id);
+    const streakStr = streak > 0 ? ` 🔥${streak}d` : '';
+    return `${categoryEmoji(h.category)} *${h.habit_name}*${target} ${status}${streakStr}`;
+  });
+
   const done  = logs.filter(l => l.completion_value === 100).length;
   const score = habits.length
     ? Math.round(logs.reduce((s, l) => s + l.completion_value, 0) / (habits.length * 100) * 100)
     : 0;
 
+  // Trend: compare today's score to 7-day average
+  const weekDates = getRangeDates(7, user.timezone);
+  const weekLogs  = db.getRangeLogs(user.id, weekDates[0], weekDates[weekDates.length - 1]);
+  const sevenDayAvg = habits.length && weekLogs.length
+    ? Math.round(weekLogs.reduce((s, l) => s + l.completion_value, 0) / (7 * habits.length * 100) * 100)
+    : 0;
+
+  let trend = '➡️ on track';
+  if (score > sevenDayAvg + 10) trend = `📈 +${score - sevenDayAvg}% vs avg`;
+  else if (score < sevenDayAvg - 10) trend = `📉 -${sevenDayAvg - score}% vs avg`;
+
   await bot.sendMessage(chatId,
-    `*${date}*\n\n${lines.join('\n')}\n\n✅ ${done}/${habits.length} — *${score}%*`,
-    { parse_mode: 'Markdown' }
+    `*${date}*\n\n${lines.join('\n')}\n\n✅ ${done}/${habits.length} — *${score}%* ${trend}`,
+    { parse_mode: 'Markdown', reply_markup: buildAllDoneKeyboard(date) }
   );
 });
 
@@ -127,6 +167,39 @@ bot.onText(/\/dashboard/, async (msg) => {
   const user   = requireUser(chatId, msg.from.id);
   if (!user) return;
   await bot.sendMessage(chatId, dashboard.generateReport(user), { parse_mode: 'Markdown' });
+});
+
+// ── /habit <name> ──────────────────────────────────────────────────────────
+bot.onText(/\/habit\s+(.+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const user   = requireUser(chatId, msg.from.id);
+  if (!user) return;
+
+  const query = match[1].trim().toLowerCase();
+  const habits = db.getHabits(user.id);
+  const habit  = habits.find(h => h.habit_name.toLowerCase().includes(query));
+  if (!habit) return bot.sendMessage(chatId, `❌ No habit found matching "${match[1].trim()}"`);
+
+  const streak  = db.getHabitStreak(user.id, habit.id);
+  const best    = db.getHabitPersonalBest(user.id, habit.id);
+  const stats   = db.getHabitStats(user.id, habit.id, 30);
+  const calLogs = db.getHabitCalendar(user.id, habit.id, 28);
+  const heatmap = buildHeatmap(calLogs, 28);
+
+  const emoji   = categoryEmoji(habit.category);
+  const target  = habit.target_value ? ` — ${habit.target_value}` : '';
+  const donePct = Math.round(stats.done100 / 30 * 100);
+
+  const lines = [
+    `${emoji} *${habit.habit_name}*${target}`,
+    `🔥 Streak: ${streak} days | 🏆 Best: ${best} days`,
+    `📊 30 days: ${donePct}% done | ${stats.consistency}% consistency`,
+    ``,
+    `*Last 28 days:*`,
+    heatmap,
+  ];
+
+  await bot.sendMessage(chatId, lines.join('\n'), { parse_mode: 'Markdown' });
 });
 
 // ── /addhabit ──────────────────────────────────────────────────────────────
@@ -230,6 +303,8 @@ bot.on('callback_query', async (q) => {
       return;
     }
 
+    const oldBest = db.getHabitPersonalBest(user.id, habitId);
+
     db.logHabit(user.id, habitId, date, value);
 
     // Update BOTH the text line (green ✅ / emoji) AND the keyboard
@@ -244,6 +319,14 @@ bot.on('callback_query', async (q) => {
       await bot.editMessageReplyMarkup(buildLogKeyboard(habitId, date, value), {
         chat_id: chatId, message_id: msgId,
       });
+    }
+
+    const newStreak = db.getHabitStreak(user.id, habitId);
+    if (value > 0 && newStreak > 0 && newStreak > oldBest) {
+      await bot.sendMessage(chatId,
+        `🏆 New personal best! *${habit.habit_name}* streak: ${newStreak} days (beat your old record of ${oldBest}!)`,
+        { parse_mode: 'Markdown' }
+      );
     }
 
     // Progress feedback — show when all habits have been logged for today
@@ -269,6 +352,19 @@ bot.on('callback_query', async (q) => {
         );
       }
     }
+
+    // Note capture prompt
+    state.set(String(telegramId), { step: 'note_capture', data: { habitId, date } });
+    const noteMsg = await bot.sendMessage(chatId, '📝 Add a note? (type it or tap Skip)', {
+      reply_markup: { inline_keyboard: [[{ text: 'Skip', callback_data: `skip_note:${habitId}:${date}` }]] },
+    });
+    const noteMsgId = noteMsg.message_id;
+    setTimeout(() => {
+      const curr = state.get(String(telegramId));
+      if (curr && curr.step === 'note_capture') state.delete(String(telegramId));
+      bot.deleteMessage(chatId, noteMsgId).catch(() => {});
+    }, 120000);
+
     return;
   }
 
@@ -277,6 +373,31 @@ bot.on('callback_query', async (q) => {
     const habitId = parseInt(data.split(':')[1]);
     db.removeHabit(habitId, user.id);
     await bot.editMessageText('Removed.', { chat_id: chatId, message_id: msgId });
+    return;
+  }
+
+  // alldone:{date}
+  if (data.startsWith('alldone:')) {
+    const date = data.split(':').slice(1).join(':');
+    const today = getToday(user.timezone);
+    if (date < today) {
+      await bot.answerCallbackQuery(qId, { text: "⛔ Can't mark past dates as done.", show_alert: true });
+      return;
+    }
+    const habits = db.getHabits(user.id);
+    for (const habit of habits) db.logHabit(user.id, habit.id, date, 100);
+    await bot.editMessageText('✅ All habits marked done!', { chat_id: chatId, message_id: msgId });
+    await bot.sendMessage(chatId,
+      `🎉 *Perfect day!* All ${habits.length}/${habits.length} habits marked done!`,
+      { parse_mode: 'Markdown' }
+    );
+    return;
+  }
+
+  // skip_note:{habitId}:{date}
+  if (data.startsWith('skip_note:')) {
+    state.delete(String(telegramId));
+    await bot.editMessageText('✅ Skipped.', { chat_id: chatId, message_id: msgId });
     return;
   }
 
@@ -365,12 +486,28 @@ bot.on('callback_query', async (q) => {
       chat_id: chatId, message_id: msgId,
       reply_markup: {
         inline_keyboard: [
-          [{ text: '✏️ Name',       callback_data: `ef:${habitId}:name`   }],
-          [{ text: '🎯 Target',     callback_data: `ef:${habitId}:target` }],
-          [{ text: '🔔 Check-in',   callback_data: `ef:${habitId}:slot`   }],
+          [{ text: '✏️ Name',      callback_data: `ef:${habitId}:name`   }],
+          [{ text: '🎯 Target',    callback_data: `ef:${habitId}:target` }],
+          [{ text: '🔔 Check-in',  callback_data: `ef:${habitId}:slot`   }],
+          [{ text: '⬆️ Move up',   callback_data: `eu:${habitId}`        }],
         ],
       },
     });
+    return;
+  }
+
+  // eu:{habitId} — move habit up
+  if (data.startsWith('eu:')) {
+    const habitId = parseInt(data.split(':')[1]);
+    const habits  = db.getHabits(user.id);
+    const idx     = habits.findIndex(h => h.id === habitId);
+    if (idx > 0) {
+      db.updateHabitOrder(habits[idx].id, user.id, idx - 1);
+      db.updateHabitOrder(habits[idx - 1].id, user.id, idx);
+      await bot.editMessageText('⬆️ Moved up!', { chat_id: chatId, message_id: msgId });
+    } else {
+      await bot.editMessageText('Already at top.', { chat_id: chatId, message_id: msgId });
+    }
     return;
   }
 
@@ -574,6 +711,13 @@ bot.on('message', async (msg) => {
       await bot.sendMessage(chatId, `Sent to ${sent} users.`);
       break;
     }
+
+    case 'note_capture': {
+      db.updateLogNote(user.id, s.data.habitId, s.data.date, text);
+      state.delete(String(telegramId));
+      await bot.sendMessage(chatId, '📝 Note saved!');
+      break;
+    }
   }
 });
 
@@ -600,4 +744,9 @@ async function sendCheckin(user, type) {
   }
 }
 
-module.exports = { bot, sendCheckin };
+// ── Weekly report sender (called by scheduler) ────────────────────────────
+async function sendWeeklyReport(user) {
+  await bot.sendMessage(user.telegram_id, dashboard.generateReport(user), { parse_mode: 'Markdown' });
+}
+
+module.exports = { bot, sendCheckin, sendWeeklyReport };

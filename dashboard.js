@@ -48,8 +48,34 @@ function habitBreakdown(habits, logs, days) {
     const hLogs = logs.filter(l => l.habit_id === h.id);
     const pct   = Math.round(hLogs.reduce((s, l) => s + l.completion_value, 0) / (days * 100) * 100);
     const dot   = pct >= 80 ? '🟢' : pct >= 50 ? '🟡' : '🔴';
-    return `${dot} ${h.habit_name}: *${pct}%*`;
+    const streak = db.getHabitStreak(h.user_id, h.id);
+    const streakStr = streak > 0 ? ` 🔥${streak}d` : '';
+    return `${dot} ${h.habit_name}: *${pct}%*${streakStr}`;
   });
+}
+
+// ── Weekly consistency / completion ───────────────────────────────────────
+function weeklyConsistency(habits, logs, dates) {
+  if (!habits.length || !dates.length) return 0;
+  const daysLogged = dates.filter(date => logs.some(l => l.date === date && l.completion_value > 0)).length;
+  return Math.round(daysLogged / dates.length * 100);
+}
+
+function weeklyCompletion(habits, logs, dates) {
+  if (!habits.length || !dates.length) return 0;
+  const done100 = logs.filter(l => l.completion_value === 100).length;
+  return Math.round(done100 / (habits.length * dates.length) * 100);
+}
+
+function worstHabit(habits, logs, days) {
+  if (!habits.length) return null;
+  const scored = habits.map(h => {
+    const hLogs = logs.filter(l => l.habit_id === h.id);
+    const score = hLogs.reduce((s, l) => s + l.completion_value, 0) / (days * 100) * 100;
+    return { name: h.habit_name, score };
+  }).sort((a, b) => a.score - b.score);
+  const worst = scored[0];
+  return worst.score < 50 ? worst : null;
 }
 
 // ── Consistency score (0–100) ──────────────────────────────────────────────
@@ -125,9 +151,12 @@ function generateReport(user) {
   const yearScore  = consistencyScore(habits, yearLogs,  365);
   const streak     = currentStreak(habits, monthLogs, user.timezone);
   const best       = bestHabit(habits, monthLogs, 30);
+  const worst      = worstHabit(habits, monthLogs, 30);
   const water      = waterAverage(habits, weekLogs, 7);
   const pushups    = exerciseTotal(habits, weekLogs, 'push');
   const squats     = exerciseTotal(habits, weekLogs, 'squat');
+  const weekCons   = weeklyConsistency(habits, weekLogs, week.dates);
+  const weekComp   = weeklyCompletion(habits, weekLogs, week.dates);
 
   const morningHabits = habits.filter(h => h.notify_morning);
   const nightHabits   = habits.filter(h => h.notify_night);
@@ -148,7 +177,8 @@ function generateReport(user) {
     ``,
     `📅 *THIS WEEK*`,
     `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄`,
-    `${scoreEmoji(weekScore)} Consistency: *${weekScore}%*`,
+    `${scoreEmoji(weekCons)} Consistency: *${weekCons}%* (days logged)`,
+    `${scoreEmoji(weekComp)} Completion:  *${weekComp}%* (habits 100%)`,
     `\`${bar(weekScore)}\` `,
     ``,
     `_7-day activity:_`,
@@ -180,6 +210,18 @@ function generateReport(user) {
     `\`${bar(monthScore)}\` `,
     `🔥 Streak: *${streakFire(streak)}*`,
     `🏆 Best habit: *${best}*`,
+  );
+  if (worst) lines.push(`⚠️ Focus habit: *${worst.name}* (${Math.round(worst.score)}%)`);
+
+  const personalBests = habits
+    .map(h => ({ name: h.habit_name, best: db.getHabitPersonalBest(h.user_id, h.id) }))
+    .filter(h => h.best >= 7);
+  if (personalBests.length) {
+    lines.push('', '🏆 *Personal Bests (7+ days)*');
+    personalBests.forEach(h => lines.push(`  ${h.name}: ${h.best} days`));
+  }
+
+  lines.push(
     ``,
     `📅 *THIS YEAR*`,
     `┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄`,

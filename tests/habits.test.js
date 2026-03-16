@@ -6,7 +6,7 @@
 // Set env before any require that loads config.js
 process.env.TELEGRAM_BOT_TOKEN = 'test-token'
 
-const { getToday, getUserTime, completionLabel, categoryEmoji, extractNumber, buildLogKeyboard } = require('../habits')
+const { getToday, getUserTime, completionLabel, categoryEmoji, extractNumber, buildLogKeyboard, buildHeatmap, buildAllDoneKeyboard } = require('../habits')
 
 // ── getToday ────────────────────────────────────────────────────────────────
 describe('getToday', () => {
@@ -153,5 +153,73 @@ describe('buildLogKeyboard', () => {
     buttons.forEach(b => {
       expect(b.callback_data).toMatch(/^log:\d+:\d+:\d{4}-\d{2}-\d{2}$/)
     })
+  })
+})
+
+// ── buildHeatmap ─────────────────────────────────────────────────────────────
+describe('buildHeatmap', () => {
+  it('returns 4 rows for 28 days', () => {
+    const rows = buildHeatmap([], 28).split('\n')
+    expect(rows).toHaveLength(4)
+  })
+
+  it('each row has 7 cells (emojis)', () => {
+    const rows = buildHeatmap([], 28).split('\n')
+    rows.forEach(row => {
+      const emojiCount = [...row].filter(c => c.codePointAt(0) > 0x2000).length
+      expect(emojiCount).toBe(7)
+    })
+  })
+
+  it('shows ⬜ for unlogged days', () => {
+    const result = buildHeatmap([], 28)
+    expect(result).toContain('⬜')
+  })
+
+  it('shows 🟩 for 100% days', () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const result = buildHeatmap([{ date: today, completion_value: 100 }], 28)
+    expect(result).toContain('🟩')
+  })
+
+  it('shows 🟨 for 50% days', () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const result = buildHeatmap([{ date: today, completion_value: 50 }], 28)
+    expect(result).toContain('🟨')
+  })
+
+  it('shows 🟧 for 25% days', () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const result = buildHeatmap([{ date: today, completion_value: 25 }], 28)
+    expect(result).toContain('🟧')
+  })
+
+  it('shows 🟥 for skipped (0) logged days', () => {
+    const today = new Date().toISOString().slice(0, 10)
+    const result = buildHeatmap([{ date: today, completion_value: 0 }], 28)
+    expect(result).toContain('🟥')
+  })
+})
+
+// ── buildAllDoneKeyboard ─────────────────────────────────────────────────────
+describe('buildAllDoneKeyboard', () => {
+  it('returns an object with inline_keyboard', () => {
+    const kb = buildAllDoneKeyboard('2024-01-01')
+    expect(kb).toHaveProperty('inline_keyboard')
+  })
+
+  it('has exactly one button', () => {
+    const kb = buildAllDoneKeyboard('2024-01-01')
+    expect(kb.inline_keyboard[0]).toHaveLength(1)
+  })
+
+  it('callback_data starts with alldone:', () => {
+    const kb = buildAllDoneKeyboard('2024-06-15')
+    expect(kb.inline_keyboard[0][0].callback_data).toBe('alldone:2024-06-15')
+  })
+
+  it('button text contains Mark all done', () => {
+    const kb = buildAllDoneKeyboard('2024-01-01')
+    expect(kb.inline_keyboard[0][0].text).toContain('Mark all done')
   })
 })
