@@ -7,8 +7,8 @@ let db;
 
 function getDb() {
   if (db) return db;
-  const isEphemeral = !config.DB_PATH.startsWith('/app/data') && !config.DB_PATH.startsWith('/data');
-  if (isEphemeral) console.warn('[DB] ⚠️  Running on ephemeral storage. Data will be lost on redeploy!\n    Fix: Right-click Railway canvas → Add Volume → mount at /app/data → set DB_PATH=/app/data/habits.db');
+  const isRailwayEphemeral = !config.DB_PATH.startsWith('/app/data') && !config.DB_PATH.startsWith('/data') && config.DB_PATH.startsWith('.');
+  if (isRailwayEphemeral) console.warn('[DB] ⚠️  Running on ephemeral storage. Data will be lost on redeploy!\n    Fix: Right-click Railway canvas → Add Volume → mount at /app/data → set DB_PATH=/app/data/habits.db');
   const dir = path.dirname(config.DB_PATH);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   db = new Database(config.DB_PATH);
@@ -407,7 +407,7 @@ function checkAndCelebrateMilestone(userId, habitId, streak) {
   const milestone = thresholds.filter(t => t <= streak).pop();
   if (!milestone) return null;
   const existing = db.prepare(
-    'SELECT id FROM milestone_log WHERE user_id = ? AND habit_id = ? AND milestone = ?'
+    'SELECT id FROM milestone_log WHERE user_id = ? AND habit_id IS ? AND milestone = ?'
   ).get(userId, habitId, milestone);
   if (existing) return null;
   try {
