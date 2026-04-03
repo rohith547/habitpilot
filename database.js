@@ -269,7 +269,8 @@ function getHabitStreak(userId, habitId) {
   ).all(userId, habitId);
   if (!rows.length) return 0;
   let streak = 0;
-  const today = new Date(); today.setHours(0, 0, 0, 0);
+  // Use UTC date string (same format as stored dates) to avoid local-timezone mismatch
+  const today = new Date(new Date().toISOString().slice(0, 10) + 'T00:00:00');
   for (const row of rows) {
     const d = new Date(row.date + 'T00:00:00');
     const diff = Math.round((today - d) / 86400000);
@@ -406,7 +407,7 @@ function checkAndCelebrateMilestone(userId, habitId, streak) {
   const milestone = thresholds.filter(t => t <= streak).pop();
   if (!milestone) return null;
   const existing = db.prepare(
-    'SELECT id FROM milestone_log WHERE user_id = ? AND habit_id IS ? AND milestone = ?'
+    'SELECT id FROM milestone_log WHERE user_id = ? AND habit_id = ? AND milestone = ?'
   ).get(userId, habitId, milestone);
   if (existing) return null;
   try {
